@@ -1,5 +1,5 @@
 # OCR_and_API
-
+```
 DashbordAdmin/
 ├── .nuxt/                  # Generated Nuxt files
 ├── components/             # Vue components
@@ -28,4 +28,4 @@ DashbordAdmin/
 │   └── images/
 ├── app.vue              # App root component
 ├── nuxt.config.ts       # Nuxt configuration
-└── package.json         # Project dependencies
+└── package.json         # Project dependencies```
