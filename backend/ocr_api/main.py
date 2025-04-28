@@ -17,8 +17,8 @@ from processors.bbl import BBLProcessor  # Add this import
 
 app = FastAPI()
 
-# กำหนด path ของ Tesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# # กำหนด path ของ Tesseract
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
 def preprocess_image(image, processor=None):

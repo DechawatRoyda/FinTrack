@@ -8,35 +8,41 @@ const router = express.Router();
 // 1. สร้าง Workspace ใหม่
 router.post("/", authenticateToken, async (req, res) => {
   try {
-    const { name, type, budget } = req.body;
+    const { name, type, budget, members } = req.body;
     
-    // Check if req.user has the expected format
-    if (!req.user || !req.user.id) {
+    if (!req.user?.id) {
       return res.status(400).json({ error: "User authentication data is incomplete" });
     }
     
-    const owner = req.user.id;  // JWT typically uses 'id' not '_id'
+    const owner = req.user.id;
     
     if (!name || !type) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // For debugging
-    console.log("JWT User data:", req.user);
-    console.log("Using owner ID:", owner);
-
-    const workspace = new Workspace({
+    const workspaceData = {
       name,
-      owner,  // Use the extracted user ID
+      owner,
       type,
       budget: budget || 0,
-      members: [{ user: owner, join_at: new Date() }],
+      members: members?.length ? 
+        members.map(member => ({
+          user: member.user,
+          join_at: new Date()
+        })) : 
+        [{ user: owner, join_at: new Date() }],
       createdAt: new Date(),
-      updatedAt: new Date(),
-    });
+      updatedAt: new Date()
+    };
 
+    const workspace = new Workspace(workspaceData);
     await workspace.save();
-    res.status(201).json(workspace);
+    
+    // populate members.user เพื่อส่งข้อมูล user กลับไป
+    const populatedWorkspace = await Workspace.findById(workspace._id)
+      .populate('members.user', 'username name email');
+      
+    res.status(201).json(populatedWorkspace);
   } catch (err) {
     console.error("Workspace creation error:", err);
     res.status(500).json({ error: "Failed to create workspace", message: err.message });
@@ -46,6 +52,8 @@ router.post("/", authenticateToken, async (req, res) => {
 // เพิ่มเส้นทางสำหรับดึงข้อมูล workspace ทั้งหมดของผู้ใช้
 router.get("/", authenticateToken, async (req, res) => {
   try {
+    // console.log("GET /workspaces endpoint hit");
+    // console.log("User data:", req.user);
     // ตรวจสอบว่า req.user มีข้อมูลหรือไม่
     if (!req.user || !req.user.id) {
       return res.status(400).json({ error: "User authentication data is incomplete" });
@@ -58,7 +66,7 @@ router.get("/", authenticateToken, async (req, res) => {
         { 'members.user': req.user.id }  // เป็นสมาชิก
       ]
     });
-
+    // console.log("Found workspaces:", workspaces);
     res.json(workspaces);
   } catch (err) {
     console.error("Fetch workspaces error:", err);

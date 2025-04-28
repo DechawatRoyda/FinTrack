@@ -19,6 +19,7 @@ const workspaceSchema = new mongoose.Schema({
   },
   members: [
     {
+      _id: false, // ปิดการสร้าง _id อัตโนมัติ
       user: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "User", // อ้างอิงไปยังโมเดล User

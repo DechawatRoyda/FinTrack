@@ -22,15 +22,19 @@ const requestSchema = new mongoose.Schema({
       quantity: Number,
     },
   ],
-  proof: [
-    {
-      type: String, // URL ของ E-slip หรือใบเสร็จ
-      required: true,
-    },
-  ],
+  // สลิปของ requester
+  requesterProof: {
+    type: String,
+    required: true,
+  },
+  // สลิปของ owner
+  ownerProof: {
+    type: String,
+    default: null
+  },
   status: {
     type: String,
-    enum: ["pending", "approved", "rejected"],
+    enum: ["pending", "approved", "rejected", "completed"], // เพิ่ม completed สำหรับเมื่อ owner แนบสลิป
     default: "pending",
   },
   createdAt: {
@@ -40,7 +44,7 @@ const requestSchema = new mongoose.Schema({
   updatedAt: {
     type: Date,
     default: Date.now,
-  },
+  }
 });
 
 const Request = mongoose.model("Request", requestSchema);

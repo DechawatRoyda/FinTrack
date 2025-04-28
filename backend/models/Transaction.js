@@ -31,6 +31,17 @@ const transactionSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  reference: {
+    type: {
+      type: String,
+      enum: ['Request', 'Bill'],
+      required: true
+    },
+    id: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true
+    }
+  },
   // เพิ่มฟิลด์สำหรับเก็บข้อมูลจาก OCR
   ocr_data: {
     date: String,

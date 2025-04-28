@@ -19,18 +19,32 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  numberAccount: {
+    type: String,
+    required: true, // หมายเลขบัญชีที่ใช้จ่าย
+  },
   phone: {
     type: String,
-    required: true,
   },
   max_limit_expense: {
     type: String,
-    required: true,
   },
   avatar_url: {
     type: String,
-    required: true,
   },
+  role: {
+    type: String,
+    enum: ['user', 'admin'],
+    default: 'user',
+    required: true
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
+  lastLogin: {
+    type: Date
+  }
 });
 
 // สร้างโมเดล User
