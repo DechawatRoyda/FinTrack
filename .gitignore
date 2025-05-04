@@ -1,5 +1,27 @@
-node_modules
+# Dependencies
+node_modules/
+/backend/node_modules/
+/frontend/node_modules/
+/ocr_api/__pycache__/
+
+# Environment files
 .env
 *.env
 .env.*
 !.env.example
+
+# Build files
+/dist/
+/build/
+
+# IDE files
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS generated files
+.DS_Store
+Thumbs.db
