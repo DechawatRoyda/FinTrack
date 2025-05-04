@@ -4,6 +4,13 @@ import Workspace from "../models/Workspace.js";
 import { authenticateToken, validateUserId } from "../middleware/auth.js";
 import User from "../models/User.js";
 import Transaction from "../models/Transaction.js";
+import multer from "multer";
+import {
+  uploadToAzureBlob,
+  deleteFromAzureBlob,
+} from "../utils/azureStorage.js"; // เพิ่ม import
+
+import { generateBillBlobPath } from "../utils/BillsBlobHelper.js";
 
 import {
   checkWorkspaceAccessMiddleware,
@@ -16,7 +23,11 @@ import {
 } from "../middleware/billValidation.js";
 
 const router = express.Router();
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
+// เพิ่ม constant นี้
+const AZURE_BLOB_DOMAIN = "https://fintrack101.blob.core.windows.net";
 /**
  * @route POST /api/bills
  * @desc Create a new bill
@@ -29,6 +40,7 @@ router.post(
     validateUserId,
     checkWorkspaceAccessMiddleware,
     validateBillCreation,
+    upload.single("eSlip"), // เพิ่ม multer middleware
   ],
   async (req, res) => {
     // แก้ไขการรับ body
@@ -36,6 +48,21 @@ router.post(
     const workspace = req.workspaceId;
 
     try {
+      // Upload to Azure Blob if file exists
+      let slipUrl = null;
+      if (req.file) {
+        const blobPath = generateBillBlobPath("bill-create", {
+          userId: req.userId,
+          workspaceId: workspace,
+          originalname: req.file.originalname,
+        });
+        slipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
+          userId: req.userId.toString(),
+          workspaceId: workspace.toString(),
+          type: "bill-creation",
+          contentType: req.file.mimetype // เพิ่มบรรทัดนี้
+        });
+      }
       // 1. ดึงข้อมูล creator จาก token แทน
       const user = await User.findById(req.userId);
       if (!user) {
@@ -76,7 +103,7 @@ router.post(
           },
         ],
         note,
-        eSlip,
+        eSlip: slipUrl || req.body.eSlip,
         status: "pending",
       });
 
@@ -155,10 +182,35 @@ router.get(
           message: "Bill not found",
         });
 
+      // แปลงข้อมูลให้มี URL ของรูปภาพ
+      const detailedBill = {
+        ...bill.toObject(),
+        // รูปสลิปหลัก
+        eSlip: bill.eSlip
+          ? {
+              url: bill.eSlip,
+              path: bill.eSlip ? new URL(bill.eSlip).pathname : null,
+            }
+          : null,
+        // รูปสลิปการจ่ายเงินของแต่ละคน
+        items: bill.items.map((item) => ({
+          ...item,
+          sharedWith: item.sharedWith.map((share) => ({
+            ...share,
+            eSlip: share.eSlip
+              ? {
+                  url: share.eSlip,
+                  path: share.eSlip ? new URL(share.eSlip).pathname : null,
+                }
+              : null,
+          })),
+        })),
+      };
+
       res.status(200).json({
         success: true,
         message: "Bills retrieved successfully",
-        data: bill,
+        data: detailedBill,
       });
     } catch (err) {
       console.error(`Error in ${req.method} ${req.originalUrl}:`, {
@@ -189,10 +241,26 @@ router.put(
     checkWorkspaceAccessMiddleware,
     checkBillStatus,
     checkBillCreator,
+    upload.single("eSlip"), // เพิ่ม multer middleware
   ],
   async (req, res) => {
-    const { billId } = req.params;
+    const bill = req.bill;
     const { items, note, eSlip, status } = req.body;
+
+    // Upload new slip if provided
+    if (req.file) {
+      const blobPath = generateBillBlobPath("bill-update", {
+        userId: req.userId,
+        billId: bill._id,
+        originalname: req.file.originalname,
+      });
+      const newSlipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
+        userId: req.userId.toString(),
+        billId: bill._id.toString(),
+        type: "bill-update",
+      });
+      bill.eSlip = newSlipUrl;
+    }
 
     try {
       const bill = req.bill;
@@ -304,16 +372,14 @@ router.post(
     checkWorkspaceAccessMiddleware,
     checkBillStatus,
     validatePayment,
+    upload.single("eSlip"), // เพิ่ม multer middleware
   ],
   async (req, res) => {
     const bill = req.bill; // เพิ่มบรรทัดนี้ - ใช้ bill จาก middleware
     const { eslipUrl, itemId } = req.body;
 
     try {
-      // ค้นหา item และ userShare
-      const item = bill.items.find(
-        (item) => item._id.toString() === itemId.toString()
-      );
+      const item = bill.items.find((item) => item._id.toString() === itemId);
       if (!item) {
         return res.status(404).json({
           success: false,
@@ -321,29 +387,36 @@ router.post(
         });
       }
 
-      const itemIndex = bill.items.indexOf(item);
-
-      // ค้นหา userShare โดยใช้ toString() ทั้งสองฝั่ง
       const userShare = item.sharedWith.find(
-        (share) => share.user._id.toString() === req.userId.toString()
+        (share) => share.user.toString() === req.userId.toString()
       );
       if (!userShare) {
         return res.status(404).json({
           success: false,
           message: "User not found in shared list",
-          details: {
-            userId: req.userId,
-            itemId: itemId,
-          },
         });
       }
 
-      const userShareIndex = item.sharedWith.indexOf(userShare);
+      // Upload payment slip to Azure Blob
+      if (req.file) {
+        const blobPath = generateBillBlobPath("payment-submit", {
+          userId: req.userId,
+          billId: bill._id,
+          itemId: itemId,
+          originalname: req.file.originalname,
+        });
+        const slipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
+          userId: req.userId.toString(),
+          billId: bill._id.toString(),
+          itemId: itemId,
+          type: "payment-slip",
+        });
+        userShare.eSlip = slipUrl;
+      }
 
-      // อัพเดตสลิปและเปลี่ยนสถานะเป็น awaiting_confirmation (รอการยืนยัน)
-      userShare.eSlip = eslipUrl;
       userShare.status = "awaiting_confirmation";
       await bill.save();
+
       res.json({
         success: true,
         message: "Payment evidence submitted successfully",
@@ -458,11 +531,45 @@ router.patch(
         bill.status = "paid";
 
         // สร้าง Transaction สำหรับทุกคนที่จ่ายในบิล
-        const transactions = bill.items
-          .map((item) => {
-            return item.sharedWith
-              .map((share) => {
+        const transactions = await Promise.all(
+          bill.items.map(async (item) => {
+            return Promise.all(
+              item.sharedWith.map(async (share) => {
                 if (share.status === "paid") {
+                  // สร้างชื่อไฟล์ที่ไม่ซ้ำกัน
+                  const blobPath = generateBillBlobPath("payment-confirm", {
+                    userId: share.user,
+                    billId: bill._id,
+                    itemId: item._id,
+                  });
+                  let slipUrl = share.eSlip;
+
+                  // อัพโหลดสลิปไปยัง Azure Blob ถ้ายังไม่เคยอัพโหลด
+                  if (
+                    share.eSlip &&
+                    !share.eSlip.startsWith(
+                      AZURE_BLOB_DOMAIN
+                    )
+                  ) {
+                    try {
+                      const response = await fetch(share.eSlip);
+                      const buffer = await response.buffer();
+
+                      slipUrl = await uploadToAzureBlob(buffer, blobPath, {
+                        billId: bill._id.toString(),
+                        itemId: item._id.toString(),
+                        userId: share.user.toString(),
+                        type: "payment-confirm",
+                      });
+
+                      // อัพเดต eSlip ใน bill ด้วย URL ใหม่
+                      share.eSlip = slipUrl;
+                    } catch (error) {
+                      console.error("Error uploading to Azure:", error);
+                      // ใช้ URL เดิมถ้าอัพโหลดไม่สำเร็จ
+                    }
+                  }
+
                   return new Transaction({
                     user: bill.creator[0].userId,
                     workspace: bill.workspace,
@@ -470,7 +577,7 @@ router.patch(
                     amount: share.shareAmount,
                     category: "Bill Payment",
                     description: `Bill payment received from ${share.name}`,
-                    slip_image: share.eSlip,
+                    slip_image: slipUrl, // ใช้ URL จาก Azure Blob
                     reference: {
                       type: "Bill",
                       id: bill._id,
@@ -480,14 +587,16 @@ router.patch(
                   });
                 }
               })
-              .filter((t) => t); // กรองเอาแค่ transaction ที่ไม่เป็น undefined
+            ).then((transactions) => transactions.filter((t) => t));
           })
-          .flat(); // แปลง array 2 มิติให้เป็น 1 มิติ
+        );
 
-        // บันทึก transactions ทั้งหมด
-        await Promise.all(transactions.map((t) => t.save()));
+        // บันทึก transactions และ bill
+        await Promise.all([
+          ...transactions.flat().map((t) => t.save()),
+          bill.save(),
+        ]);
       }
-      await bill.save();
 
       // แก้ไข response format
       res.json({
@@ -534,16 +643,50 @@ router.patch(
     checkBillCreator,
   ],
   async (req, res) => {
-    const { billId } = req.params;
-
     try {
       const bill = req.bill;
+
+      // 1. ลบรูปสลิปหลักของบิล
+      if (bill.eSlip?.includes(AZURE_BLOB_DOMAIN)) {
+        try {
+          await deleteFromAzureBlob(bill.eSlip);
+          bill.eSlip = null;
+          console.log(`Deleted main bill slip for bill ${bill._id}`);
+        } catch (error) {
+          console.error("Error deleting main bill slip:", error);
+        }
+      }
+
+      // 2. ลบรูปสลิปการจ่ายเงินของทุกคนที่ร่วมจ่าย
+      for (const item of bill.items) {
+        for (const share of item.sharedWith) {
+          if (share.eSlip?.includes(AZURE_BLOB_DOMAIN)) {
+            try {
+              await deleteFromAzureBlob(share.eSlip);
+              share.eSlip = null;
+              console.log(
+                `Deleted payment slip for user ${share.user} in bill ${bill._id}`
+              );
+            } catch (error) {
+              console.error("Error deleting payment slip:", error);
+            }
+          }
+          // รีเซ็ตสถานะการจ่ายเงิน
+          share.status = "canceled";
+        }
+      }
+
+      // 3. อัพเดตสถานะและบันทึกการเปลี่ยนแปลง
       bill.status = "canceled";
+      bill.canceledAt = new Date();
+      bill.canceledBy = req.userId;
+      bill.updatedAt = new Date();
+
       await bill.save();
 
       res.json({
         success: true,
-        message: "Bill canceled successfully",
+        message: "Bill canceled and all associated files deleted successfully",
         data: bill,
       });
     } catch (err) {
@@ -580,11 +723,35 @@ router.delete(
     const { billId } = req.params;
 
     try {
-      const bill = req.bill; // ใช้ bill จาก middleware
+      const bill = req.bill;
+
+      // Delete main bill slip if exists
+      if (bill.eSlip && bill.eSlip.includes(AZURE_BLOB_DOMAIN)) {
+        try {
+          await deleteFromAzureBlob(bill.eSlip);
+        } catch (error) {
+          console.error("Error deleting bill slip:", error);
+        }
+      }
+
+      // Delete all payment slips
+      for (const item of bill.items) {
+        for (const share of item.sharedWith) {
+          if (share.eSlip && share.eSlip.includes(AZURE_BLOB_DOMAIN)) {
+            try {
+              await deleteFromAzureBlob(share.eSlip);
+            } catch (error) {
+              console.error("Error deleting payment slip:", error);
+            }
+          }
+        }
+      }
+
       await bill.deleteOne();
+
       res.json({
         success: true,
-        message: "Bill deleted successfully",
+        message: "Bill and associated files deleted successfully",
       });
     } catch (err) {
       console.error(`Error in ${req.method} ${req.originalUrl}:`, {

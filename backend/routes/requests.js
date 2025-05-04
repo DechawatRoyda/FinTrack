@@ -2,6 +2,10 @@ import express from "express";
 import Request from "../models/Request.js";
 import Workspace from "../models/Workspace.js";
 import authenticateToken from "../middleware/auth.js";
+import multer from "multer";
+import { uploadToAzureBlob } from "../utils/azureStorage.js";
+import { generateRequestBlobPath } from "../utils/RequestsBlobHelper.js";
+
 import {
   checkWorkspaceAccessMiddleware,
   getUserId,
@@ -12,11 +16,19 @@ import {
   checkRequestStatus,
 } from "../middleware/requestAuth.js";
 
-import { validateRequestItems , validateRequesterProof } from "../middleware/requestValidation.js";
+import {
+  validateRequestItems,
+  validateRequesterProof,
+} from "../middleware/requestValidation.js";
 
 import Transaction from "../models/Transaction.js";
 
 const router = express.Router();
+// ตั้งค่า multer
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
+
+const AZURE_BLOB_DOMAIN = "https://fintrack101.blob.core.windows.net";
 
 // 1️⃣ ขอเบิกงบประมาณ
 router.post(
@@ -26,20 +38,35 @@ router.post(
     checkWorkspaceAccessMiddleware,
     checkProjectWorkspace,
     validateRequestItems,
-    validateRequesterProof
+    validateRequesterProof,
+    upload.single("requesterProof"), // เพิ่ม multer
   ],
   async (req, res) => {
-    const { amount, items, requesterProof } = req.body;
-    const workspace = req.workspaceId; // จาก middleware
-    const userId = getUserId(req.user); // ใช้ userId จาก token
-
     try {
+      const { amount, items, requesterProof } = req.body;
+      const workspace = req.workspaceId; // จาก middleware
+      const userId = getUserId(req.user); // ใช้ userId จาก token
+      // อัพโหลดไฟล์ไปยัง Azure Blob ถ้ามีไฟล์แนบมา
+      let requesterProofUrl = null;
+      if (req.file) {
+        const blobPath = generateRequestBlobPath("request-create", {
+          userId,
+          workspaceId: workspace,
+          originalname: req.file.originalname,
+        });
+        requesterProofUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
+          userId: userId.toString(),
+          workspaceId: workspace.toString(),
+          type: "requester-proof",
+          contentType: req.file.mimetype // เพิ่มบรรทัดนี้
+        });
+      }
       const request = new Request({
         workspace,
         requester: userId, // ใช้ userId จาก token
         amount,
         items,
-        requesterProof,
+        requesterProof: requesterProofUrl || req.body.requesterProof,
         status: "pending",
       });
 
@@ -87,10 +114,31 @@ router.get(
         });
       }
 
+      // แปลงข้อมูลให้มี URL ของรูปภาพ
+      const detailedRequest = {
+        ...request.toObject(),
+        requesterProof: request.requesterProof
+          ? {
+              url: request.requesterProof,
+              path: request.requesterProof
+                ? new URL(request.requesterProof).pathname
+                : null,
+            }
+          : null,
+        ownerProof: request.ownerProof
+          ? {
+              url: request.ownerProof,
+              path: request.ownerProof
+                ? new URL(request.ownerProof).pathname
+                : null,
+            }
+          : null,
+      };
+
       res.status(200).json({
         success: true,
         message: "Request details retrieved successfully",
-        data: request,
+        data: detailedRequest,
       });
     } catch (err) {
       console.error("Error fetching request:", err);
@@ -150,20 +198,18 @@ router.get(
  */
 router.put(
   "/:requestId/edit",
-  [authenticateToken, checkRequestStatus, validateRequestItems],
+  [
+    authenticateToken,
+    checkRequestStatus,
+    validateRequestItems,
+    upload.single("requesterProof"), // เพิ่ม multer middleware
+  ],
   async (req, res) => {
-    const request = req.request; // ใช้จาก middleware
-    const { amount, items, requesterProof } = req.body;
+    const request = req.request;
+    const { amount, items } = req.body;
     const userId = getUserId(req.user);
 
     try {
-      // เพิ่มการตรวจสอบ requesterProof เมื่อมีการส่งมาแก้ไข
-      if (requesterProof !== undefined && !requesterProof) {
-        return res.status(400).json({
-          success: false,
-          message: "Requester proof is required",
-        });
-      }
       // ตรวจสอบว่าเป็น requester
       if (request.requester.toString() !== userId.toString()) {
         return res.status(403).json({
@@ -171,9 +217,28 @@ router.put(
           message: "Only requester can edit this request",
         });
       }
-      if (requesterProof !== undefined) request.requesterProof = requesterProof;
 
+      // อัพโหลดไฟล์ใหม่ถ้ามี
+      if (req.file) {
+        const blobPath = generateRequestBlobPath("request-update", {
+          userId,
+          requestId: request._id,
+          originalname: req.file.originalname,
+        });
+        const newProofUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
+          userId: userId.toString(),
+          requestId: request._id.toString(),
+          type: "requester-proof-update",
+        });
+        request.requesterProof = newProofUrl;
+      }
+
+      // อัพเดทข้อมูลอื่นๆ
+      if (amount) request.amount = amount;
+      if (items) request.items = items;
       request.updatedAt = new Date();
+      request.updatedBy = userId;
+
       await request.save();
 
       res.json({
@@ -204,28 +269,28 @@ router.put(
     checkRequestStatus,
     checkProjectWorkspace,
     checkWorkspaceOwner,
+    upload.single("ownerProof"),
   ],
   async (req, res) => {
-    const request = req.request; // ใช้จาก middleware แทน
-    const { status, ownerProof } = req.body;
-    const userId = getUserId(req.user);
-
-    if (!["approved", "rejected"].includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid status",
-      });
-    }
-
     try {
-      // 2. ตรวจสอบว่ามี Transaction อยู่แล้วหรือไม่
+      const request = req.request;
+      const { status } = req.body;
+      const userId = getUserId(req.user);
+
+      // 1. Validate status
+      if (!["approved", "rejected"].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status",
+        });
+      }
+
+      // 2. Check for existing transaction
       const existingTransaction = await Transaction.findOne({
         workspace: request.workspace._id,
         user: request.requester,
         category: "Budget Request",
-        // เพิ่มเงื่อนไขเฉพาะเจาะจง
-        description: `Budget request approved by workspace owner`,
-        amount: request.amount,
+        "reference.id": request._id,
       });
 
       if (existingTransaction) {
@@ -235,50 +300,113 @@ router.put(
         });
       }
 
-      // ถ้าอนุมัติต้องแนบสลิป
+      // 3. Handle approval with proof upload
       if (status === "approved") {
-        if (!ownerProof) {
+        // Check if file is uploaded
+        if (!req.file) {
           return res.status(400).json({
             success: false,
             message: "Owner must provide payment proof for approval",
           });
         }
-        request.ownerProof = ownerProof;
-        request.status = "completed";
 
-        // สร้าง Transaction ใหม่
-        const transaction = new Transaction({
-          user: request.requester,
-          workspace: request.workspace._id,
-          type: "Income",
-          amount: request.amount,
-          category: "Budget Request",
-          description: `Budget request approved by workspace owner`,
-          slip_image: ownerProof,
-          // เพิ่ม reference ถึง request
-          reference: {
-            type: "Request",
-            id: request._id,
-          },
-        });
+        try {
+          // Upload proof to Azure Blob
+          const blobPath = generateRequestBlobPath("owner-proof", {
+            userId,
+            requestId: request._id,
+            workspaceId: request.workspace,
+            originalname: req.file.originalname,
+          });
+          const ownerProofUrl = await uploadToAzureBlob(
+            req.file.buffer,
+            blobPath,
+            {
+              userId: userId.toString(),
+              requestId: request._id.toString(),
+              type: "owner-proof",
+            }
+          );
 
-        await transaction.save();
+          // Update request with proof URL
+          request.ownerProof = ownerProofUrl;
+          request.status = "completed";
+
+          // Create new transaction
+          const transaction = new Transaction({
+            user: request.requester,
+            workspace: request.workspace._id,
+            type: "Income",
+            amount: request.amount,
+            category: "Budget Request",
+            description: `Budget request approved by workspace owner`,
+            slip_image: ownerProofUrl,
+            reference: {
+              type: "Request",
+              id: request._id,
+            },
+            transaction_date: new Date(),
+            transaction_time: new Date().toLocaleTimeString(),
+          });
+
+          // Save transaction
+          await transaction.save();
+        } catch (uploadError) {
+          console.error("Error uploading proof:", uploadError);
+          return res.status(500).json({
+            success: false,
+            message: "Failed to upload payment proof",
+            error: uploadError.message,
+          });
+        }
       } else {
+        // Handle rejection
         request.status = status;
+        request.rejectionReason = req.body.rejectionReason;
+
+        // ลบรูป requesterProof เมื่อ reject
+        if (request.requesterProof?.includes(AZURE_BLOB_DOMAIN)) {
+          try {
+            await deleteFromAzureBlob(request.requesterProof);
+            request.requesterProof = null; // เคลียร์ URL หลังจากลบ
+            console.log(
+              `Deleted requester proof for rejected request ${request._id}`
+            );
+          } catch (error) {
+            console.error("Error deleting requester proof:", error);
+          }
+        }
       }
 
+      // 4. Update request metadata
       request.updatedAt = new Date();
+      request.updatedBy = userId;
+      request.statusHistory = [
+        ...(request.statusHistory || []),
+        {
+          status: request.status,
+          updatedAt: new Date(),
+          updatedBy: userId,
+          reason: status === "rejected" ? req.body.rejectionReason : undefined,
+        },
+      ];
+
+      // 5. Save changes
       await request.save();
 
+      // 6. Send response
       res.json({
         success: true,
         message: `Request ${
           status === "approved" ? "approved and completed" : "rejected"
         } successfully`,
-        data: request,
+        data: {
+          request,
+          transaction: status === "approved" ? transaction : undefined,
+        },
       });
     } catch (err) {
-      console.error("Error updating request:", err);
+      console.error("Error updating request status:", err);
       res.status(500).json({
         success: false,
         message: "Failed to update request status",
@@ -294,9 +422,10 @@ router.delete(
   [authenticateToken, checkRequestStatus, checkProjectWorkspace],
   async (req, res) => {
     const userId = getUserId(req.user);
-    const request = req.request; // ใช้จาก middleware แทน
+    const request = req.request;
+
     try {
-      // ตรวจสอบสิทธิ์ (เป็นผู้ขอเบิกหรือ owner)
+      // ตรวจสอบสิทธิ์
       const isRequester = request.requester.toString() === userId.toString();
       const isOwner = request.workspace.owner.toString() === userId.toString();
 
@@ -307,10 +436,34 @@ router.delete(
         });
       }
 
+      // ลบไฟล์จาก Azure Blob ถ้ามี
+      if (
+        request.requesterProof &&
+        request.requesterProof.includes(AZURE_BLOB_DOMAIN)
+      ) {
+        try {
+          // สร้างฟังก์ชัน deleteFromAzureBlob ใน azureStorage.js
+          await deleteFromAzureBlob(request.requesterProof);
+        } catch (error) {
+          console.error("Error deleting proof file:", error);
+        }
+      }
+
+      if (
+        request.ownerProof &&
+        request.ownerProof.includes(AZURE_BLOB_DOMAIN)
+      ) {
+        try {
+          await deleteFromAzureBlob(request.ownerProof);
+        } catch (error) {
+          console.error("Error deleting owner proof file:", error);
+        }
+      }
+
       await request.deleteOne();
       res.json({
         success: true,
-        message: "Request deleted successfully",
+        message: "Request and associated files deleted successfully",
       });
     } catch (err) {
       console.error("Error deleting request:", err);

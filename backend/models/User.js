@@ -18,10 +18,14 @@ const userSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
+    unique: true,
+    trim: true,
   },
   numberAccount: {
     type: String,
     required: true, // หมายเลขบัญชีที่ใช้จ่าย
+    unique: true,
+    trim: true,
   },
   phone: {
     type: String,
@@ -46,6 +50,8 @@ const userSchema = new mongoose.Schema({
     type: Date
   }
 });
+
+userSchema.index({ username: 1, email: 1, numberAccount: 1 });
 
 // สร้างโมเดล User
 const User = mongoose.model("User", userSchema);

@@ -5,7 +5,7 @@ import User from "../models/User.js";
 import Session from "../models/Session.js";  // Add this import
 import dotenv from "dotenv";
 import { authenticateToken } from "../middleware/auth.js";
-import { checkAdminRole } from "../middleware/adminAuth.js";
+import { checkAdminRole,checkUserAccess } from "../middleware/adminAuth.js";
 
 dotenv.config(); // โหลดค่าจาก .env
 
@@ -28,23 +28,14 @@ router.post("/register", async (req, res) => {
       name,
       email,
       phone,
-      numberAccount, // เพิ่มฟิลด์ numberAccount
+      numberAccount,
       max_limit_expense,
       avatar_url,
     } = req.body;
 
-    // ✅ ตรวจสอบว่าข้อมูลครบถ้วน (เพิ่ม numberAccount เข้าไปในการตรวจสอบ)
-    if (
-      !username ||
-      !password ||
-      !confirmPassword ||
-      !name ||
-      !email ||
-      !numberAccount ||
-      !phone ||
-      !max_limit_expense ||
-      !avatar_url
-    ) {
+    // ✅ ตรวจสอบว่าข้อมูลครบถ้วน
+    if (!username || !password || !confirmPassword || !name || !email || 
+        !numberAccount || !phone || !max_limit_expense || !avatar_url) {
       return res.status(400).json({ error: "All fields are required" });
     }
 
@@ -53,29 +44,47 @@ router.post("/register", async (req, res) => {
       return res.status(400).json({ error: "Passwords do not match" });
     }
 
-    // ✅ ตรวจสอบว่าผู้ใช้มีอยู่แล้วหรือไม่
-    const existingUser = await User.findOne({ username });
-    if (existingUser) {
-      return res.status(400).json({ error: "Username already taken" });
+    // ✅ ตรวจสอบค่าที่ต้องไม่ซ้ำ
+    const duplicateChecks = await User.findOne({
+      $or: [
+        { username: username },
+        { email: email },
+        { numberAccount: numberAccount }
+      ]
+    });
+
+    if (duplicateChecks) {
+      const errors = [];
+      if (duplicateChecks.username === username) {
+        errors.push("Username is already taken");
+      }
+      if (duplicateChecks.email === email) {
+        errors.push("Email is already registered");
+      }
+      if (duplicateChecks.numberAccount === numberAccount) {
+        errors.push("Account number is already registered");
+      }
+      return res.status(400).json({ 
+        error: "Duplicate values found", 
+        details: errors 
+      });
     }
 
     const max_limit = Number(max_limit_expense);
     if (isNaN(max_limit)) {
-      return res
-        .status(400)
-        .json({ error: "max_limit_expense must be a number" });
+      return res.status(400).json({ error: "max_limit_expense must be a number" });
     }
 
     // ✅ Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // ✅ สร้าง user ใหม่ (เพิ่ม numberAccount เข้าไป)
+    // ✅ สร้าง user ใหม่
     const newUser = new User({
       username,
       password: hashedPassword,
       name,
       email,
-      numberAccount, // เพิ่มฟิลด์ numberAccount
+      numberAccount,
       phone,
       max_limit_expense: max_limit,
       avatar_url,
@@ -85,7 +94,15 @@ router.post("/register", async (req, res) => {
 
     res.status(201).json({ message: "User registered successfully" });
   } catch (err) {
-    console.error(err);
+    console.error("Registration error:", err);
+    // Handle MongoDB duplicate key errors
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern)[0];
+      return res.status(400).json({
+        error: "Duplicate value",
+        details: [`${field} is already registered`]
+      });
+    }
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -231,7 +248,7 @@ router.get("/users", authenticateToken, checkAdminRole, async (req, res) => {
 });
 
 // 📌 Get User by ID
-router.get("/users/:userId", authenticateToken, async (req, res) => {
+router.get("/users/:userId", authenticateToken,checkUserAccess, async (req, res) => {
   try {
     const user = await User.findById(req.params.userId, "-password");
     if (!user) {

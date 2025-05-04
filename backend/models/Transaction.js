@@ -22,7 +22,7 @@ const transactionSchema = new mongoose.Schema({
   },
   category: {
     type: String,
-    default: 'Transfer' // default category for bank transfers
+    default: 'Transfer'
   },
   description: {
     type: String
@@ -31,36 +31,33 @@ const transactionSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  transaction_date: {
+    type: Date,
+    required: true
+  },
+  transaction_time: String,
+  transaction_id: String,
+  sender_info: {
+    name: String,
+    bank: String
+  },
+  receiver_info: {
+    name: String,
+    bank: String
+  },
   reference: {
     type: {
       type: String,
       enum: ['Request', 'Bill'],
-      required: true
+      required: false
     },
     id: {
       type: mongoose.Schema.Types.ObjectId,
-      required: true
-    }
-  },
-  // เพิ่มฟิลด์สำหรับเก็บข้อมูลจาก OCR
-  ocr_data: {
-    date: String,
-    time: String,
-    transaction_id: String,
-    sender: {
-      name: String,
-      bank: String,
-      raw_text: String
-    },
-    receiver: {
-      name: String,
-      bank: String,
-      raw_text: String
+      required: false  // เปลี่ยนเป็น false
     }
   }
 }, {
   timestamps: true
 });
-
-const Transaction = mongoose.model("Transaction", transactionSchema);
-export default Transaction;
+// เพิ่ม export default
+export default mongoose.model('Transaction', transactionSchema);
