@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "5000:5000"
+    env_file: 
+      - ./.env
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+      - ./.env:/app/.env
+    depends_on:
+      - ocr-service
+
+  ocr-service:
+    build: ./ocr_api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ocr_api/Tesseract-OCR/tessdata:/usr/share/tesseract-ocr/tessdata:ro
+    environment:
+      - TESSERACT_PATH=/usr/bin/tesseract
+      - TESSDATA_PREFIX=/usr/share/tesseract-ocr/tessdata
+      - TESSDATA_LANG=Thai
+volumes:
+  mongodb_data:
