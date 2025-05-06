@@ -69,8 +69,34 @@ export const checkWorkspaceAccessMiddleware = async (req, res, next) => {
   }
 };
 
+export const validateWorkspaceOperation = async (req, res, next) => {
+  try {
+    const workspace = await Workspace.findById(req.params.workspaceId);
+    if (!workspace) {
+      return res.status(404).json({
+        success: false,
+        message: "Workspace not found"
+      });
+    }
+    req.workspace = workspace;
+    next();
+  } catch (err) {
+    console.error(`Error validating workspace:`, {
+      error: err.message,
+      userId: req.user?.id,
+      workspaceId: req.params.workspaceId
+    });
+    res.status(500).json({
+      success: false,
+      message: "Failed to validate workspace",
+      error: err.message
+    });
+  }
+};
+
 export default {
   getUserId,
   checkWorkspaceAccess,
-  checkWorkspaceAccessMiddleware
+  checkWorkspaceAccessMiddleware,
+  validateWorkspaceOperation
 };

@@ -2,10 +2,11 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
-import Session from "../models/Session.js";  // Add this import
+import Session from "../models/Session.js"; // Add this import
 import dotenv from "dotenv";
-import { authenticateToken } from "../middleware/auth.js";
-import { checkAdminRole,checkUserAccess } from "../middleware/adminAuth.js";
+import { authenticateToken, validateUserId  } from "../middleware/auth.js";
+import { checkAdminRole, checkUserAccess } from "../middleware/adminAuth.js";
+import otpService from "../services/OtpService.js";
 
 dotenv.config(); // โหลดค่าจาก .env
 
@@ -27,31 +28,49 @@ router.post("/register", async (req, res) => {
       confirmPassword,
       name,
       email,
+      otp,
+      // Optional fields
       phone,
       numberAccount,
       max_limit_expense,
-      avatar_url,
+      avatar_url
     } = req.body;
 
-    // ✅ ตรวจสอบว่าข้อมูลครบถ้วน
-    if (!username || !password || !confirmPassword || !name || !email || 
-        !numberAccount || !phone || !max_limit_expense || !avatar_url) {
-      return res.status(400).json({ error: "All fields are required" });
+    // ✅ ตรวจสอบเฉพาะฟิลด์ที่จำเป็น
+    if (!username || !password || !confirmPassword || !name || !email || !otp) {
+      return res.status(400).json({ 
+        success: false,
+        message: "Required fields are missing",
+        requiredFields: ['username', 'password', 'confirmPassword', 'name', 'email', 'otp']
+      });
     }
 
-    // ✅ ตรวจสอบ password ว่าตรงกันหรือไม่
+    // ✅ ตรวจสอบ OTP
+    const otpVerification = otpService.verifyOTP(email, otp);
+    if (!otpVerification.success) {
+      return res.status(400).json({
+        success: false,
+        message: otpVerification.message
+      });
+    }
+
+    // ✅ ตรวจสอบ password
     if (password !== confirmPassword) {
-      return res.status(400).json({ error: "Passwords do not match" });
+      return res.status(400).json({ 
+        success: false,
+        message: "Passwords do not match" 
+      });
     }
 
-    // ✅ ตรวจสอบค่าที่ต้องไม่ซ้ำ
-    const duplicateChecks = await User.findOne({
+    // ✅ ตรวจสอบค่าที่ซ้ำ (เฉพาะ required fields)
+    const duplicateQuery = {
       $or: [
         { username: username },
-        { email: email },
-        { numberAccount: numberAccount }
+        { email: email }
       ]
-    });
+    };
+
+    const duplicateChecks = await User.findOne(duplicateQuery);
 
     if (duplicateChecks) {
       const errors = [];
@@ -61,49 +80,52 @@ router.post("/register", async (req, res) => {
       if (duplicateChecks.email === email) {
         errors.push("Email is already registered");
       }
-      if (duplicateChecks.numberAccount === numberAccount) {
-        errors.push("Account number is already registered");
-      }
-      return res.status(400).json({ 
-        error: "Duplicate values found", 
-        details: errors 
+      return res.status(400).json({
+        success: false,
+        message: "Duplicate values found",
+        details: errors
       });
-    }
-
-    const max_limit = Number(max_limit_expense);
-    if (isNaN(max_limit)) {
-      return res.status(400).json({ error: "max_limit_expense must be a number" });
     }
 
     // ✅ Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // ✅ สร้าง user ใหม่
-    const newUser = new User({
+    // ✅ สร้าง user object (เฉพาะฟิลด์ที่มีค่า)
+    const userData = {
       username,
       password: hashedPassword,
       name,
-      email,
-      numberAccount,
-      phone,
-      max_limit_expense: max_limit,
-      avatar_url,
-    });
+      email
+    };
 
+    // เพิ่มฟิลด์เสริมถ้ามีค่า
+    if (phone) userData.phone = phone;
+    if (numberAccount) userData.numberAccount = numberAccount;
+    if (max_limit_expense) userData.max_limit_expense = max_limit_expense;
+    if (avatar_url) userData.avatar_url = avatar_url;
+
+    const newUser = new User(userData);
     await newUser.save();
 
-    res.status(201).json({ message: "User registered successfully" });
+    res.status(201).json({
+      success: true,
+      message: "User registered successfully"
+    });
+
   } catch (err) {
     console.error("Registration error:", err);
-    // Handle MongoDB duplicate key errors
     if (err.code === 11000) {
       const field = Object.keys(err.keyPattern)[0];
       return res.status(400).json({
-        error: "Duplicate value",
+        success: false,
+        message: "Duplicate value",
         details: [`${field} is already registered`]
       });
     }
-    res.status(500).json({ error: "Internal server error" });
+    res.status(500).json({ 
+      success: false,
+      message: "Internal server error" 
+    });
   }
 });
 
@@ -114,15 +136,13 @@ router.post("/login", async (req, res) => {
 
     // ✅ ตรวจสอบว่ากรอกข้อมูลครบหรือไม่
     if (!username || !password) {
-      return res
-        .status(400)
-        .json({ error: "Username and password are required" });
+      return res.status(400).json({ error: "Username, password are required" });
     }
 
-    // ✅ ค้นหา user
+    // 1. ค้นหา user จาก username ก่อน
     const user = await User.findOne({ username });
     if (!user) {
-      return res.status(400).json({ error: "Invalid username or password" });
+      return res.status(400).json({ error: "Invalid credentials" });
     }
 
     // ✅ ตรวจสอบรหัสผ่าน
@@ -160,7 +180,8 @@ router.post("/login", async (req, res) => {
           username: user.username,
           name: user.name,
           role: user.role,
-          numberAccount: user.numberAccount,
+          numberAccount: user.numberAccount || null, // เพิ่ม null fallback
+          hasNumberAccount: !!user.numberAccount // เพิ่มฟิลด์แสดงสถานะว่ามีเลขบัญชีหรือไม่
         },
       },
     });
@@ -248,16 +269,124 @@ router.get("/users", authenticateToken, checkAdminRole, async (req, res) => {
 });
 
 // 📌 Get User by ID
-router.get("/users/:userId", authenticateToken,checkUserAccess, async (req, res) => {
+router.get(
+  "/users/:userId",
+  authenticateToken,
+  checkUserAccess,
+  async (req, res) => {
+    try {
+      const user = await User.findById(req.params.userId, "-password");
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      res.json(user);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to fetch user" });
+    }
+  }
+);
+
+// 📌 Edit Profile Route
+router.put("/profile", authenticateToken,validateUserId, async (req, res) => {
   try {
-    const user = await User.findById(req.params.userId, "-password");
+    const {
+      name,
+      email,
+      phone,
+      numberAccount,
+      max_limit_expense,
+      avatar_url,
+      currentPassword,
+      newPassword
+    } = req.body;
+
+    // Find user by ID (from token)
+    const user = await User.findById(req.user.id);
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
-    res.json(user);
+
+    // Check for duplicate email or account number
+    if (email !== user.email || numberAccount !== user.numberAccount) {
+      const duplicateCheck = await User.findOne({
+        $and: [
+          { _id: { $ne: req.user.id } },
+          {
+            $or: [
+              { email: email },
+              { numberAccount: numberAccount }
+            ]
+          }
+        ]
+      });
+
+      if (duplicateCheck) {
+        const errors = [];
+        if (duplicateCheck.email === email) {
+          errors.push("Email is already registered");
+        }
+        if (duplicateCheck.numberAccount === numberAccount) {
+          errors.push("Account number is already registered");
+        }
+        return res.status(400).json({
+          error: "Duplicate values found",
+          details: errors
+        });
+      }
+    }
+
+    // Validate max_limit_expense if provided
+    if (max_limit_expense) {
+      const max_limit = Number(max_limit_expense);
+      if (isNaN(max_limit)) {
+        return res.status(400).json({ error: "max_limit_expense must be a number" });
+      }
+    }
+
+    // Handle password change if requested
+    if (currentPassword && newPassword) {
+      // Verify current password
+      const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
+      if (!isPasswordValid) {
+        return res.status(400).json({ error: "Current password is incorrect" });
+      }
+      // Hash new password
+      user.password = await bcrypt.hash(newPassword, 10);
+    }
+
+    // Update user fields
+    user.name = name || user.name;
+    user.email = email || user.email;
+    user.phone = phone || user.phone;
+    user.numberAccount = numberAccount || user.numberAccount;
+    user.max_limit_expense = max_limit_expense || user.max_limit_expense;
+    user.avatar_url = avatar_url || user.avatar_url;
+
+    // Save updated user
+    await user.save();
+
+    // Return updated user data (excluding password)
+    const updatedUser = await User.findById(req.user.id).select("-password");
+
+    res.json({
+      success: true,
+      message: "Profile updated successfully",
+      data: {
+        user: updatedUser
+      }
+    });
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to fetch user" });
+    console.error("Profile update error:", err);
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern)[0];
+      return res.status(400).json({
+        error: "Duplicate value",
+        details: [`${field} is already registered`]
+      });
+    }
+    res.status(500).json({ error: "Failed to update profile" });
   }
 });
 

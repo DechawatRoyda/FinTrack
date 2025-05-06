@@ -13,7 +13,7 @@ import billRoutes from "./routes/bills.js"; // นำเข้า billRoutes
 import requestRoutes from "./routes/requests.js"; // นำเข้า requestRoutes
 import adminRoutes from "./routes/admins.js";
 import { cleanupExpiredSessions } from './middleware/sessionCleanup.js';
-
+import otpRoutes from './routes/otp.js';
 
 dotenv.config(); // โหลด environment variables
 const app = express();
@@ -47,9 +47,9 @@ app.use("/api/workspaces", workspaceRoutes); // เพิ่มเส้นท�
 
 app.use("/api/ocrslip", ocrSlipRoutes);
 
-app.use("/api/bills", billRoutes); // เพิ่มเส้นทางนี้สำหรับ bills
+app.use("/api/workspaces/:workspaceId/bills", billRoutes);
 
-app.use("/api/requests", requestRoutes); // เพิ่มเส้นทางนี้สำหรับ bills
+app.use("/api/workspaces/:workspaceId/requests", requestRoutes);
 
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.url}`);
@@ -58,6 +58,8 @@ app.use((req, res, next) => {
 });
 
 app.use("/api/admin", adminRoutes);
+
+app.use('/api/otp', otpRoutes);
 
 // ตัวอย่างการใช้ middleware สำหรับการป้องกัน route ที่ต้องการ JWT
 app.get("/api/protected", authenticateToken, (req, res) => {

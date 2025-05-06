@@ -1,232 +1,366 @@
 import express from "express";
 import Workspace from "../models/Workspace.js";
-import User from "../models/User.js";  // นำเข้า User model
+import User from "../models/User.js";
 import authenticateToken from "../middleware/auth.js";
+import { validateUserId } from "../middleware/auth.js";
+import { 
+  checkWorkspaceAccessMiddleware,
+  validateWorkspaceOperation 
+} from "../middleware/workspaceAuth.js";
 
 const router = express.Router();
 
-// 1. สร้าง Workspace ใหม่
-router.post("/", authenticateToken, async (req, res) => {
+/**
+ * @route POST /api/workspaces
+ * @desc Create new workspace
+ */
+router.post("/", [
+  authenticateToken,
+  validateUserId
+], async (req, res) => {
   try {
     const { name, type, budget, members } = req.body;
-    
-    if (!req.user?.id) {
-      return res.status(400).json({ error: "User authentication data is incomplete" });
-    }
-    
     const owner = req.user.id;
-    
+
     if (!name || !type) {
-      return res.status(400).json({ error: "Missing required fields" });
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields"
+      });
     }
 
-    const workspaceData = {
+    const workspace = new Workspace({
       name,
       owner,
       type,
       budget: budget || 0,
-      members: members?.length ? 
-        members.map(member => ({
-          user: member.user,
-          join_at: new Date()
-        })) : 
-        [{ user: owner, join_at: new Date() }],
+      members: members?.length 
+        ? members.map(member => ({
+            user: member.user,
+            join_at: new Date()
+          }))
+        : [{ user: owner, join_at: new Date() }],
       createdAt: new Date(),
       updatedAt: new Date()
-    };
+    });
 
-    const workspace = new Workspace(workspaceData);
     await workspace.save();
-    
-    // populate members.user เพื่อส่งข้อมูล user กลับไป
-    const populatedWorkspace = await Workspace.findById(workspace._id)
-      .populate('members.user', 'username name email');
-      
-    res.status(201).json(populatedWorkspace);
+    const populatedWorkspace = await workspace.populate("members.user", "username name email");
+
+    res.status(201).json({
+      success: true,
+      message: "Workspace created successfully",
+      data: populatedWorkspace
+    });
   } catch (err) {
-    console.error("Workspace creation error:", err);
-    res.status(500).json({ error: "Failed to create workspace", message: err.message });
+    console.error(`Error creating workspace:`, {
+      error: err.message,
+      userId: req.user?.id
+    });
+    res.status(500).json({
+      success: false,
+      message: "Failed to create workspace",
+      error: err.message
+    });
   }
 });
 
-// เพิ่มเส้นทางสำหรับดึงข้อมูล workspace ทั้งหมดของผู้ใช้
-router.get("/", authenticateToken, async (req, res) => {
+/**
+ * @route GET /api/workspaces
+ * @desc Get all workspaces for user
+ */
+router.get("/", [
+  authenticateToken,
+  validateUserId
+], async (req, res) => {
   try {
-    // console.log("GET /workspaces endpoint hit");
-    // console.log("User data:", req.user);
-    // ตรวจสอบว่า req.user มีข้อมูลหรือไม่
-    if (!req.user || !req.user.id) {
-      return res.status(400).json({ error: "User authentication data is incomplete" });
-    }
-
-    // ค้นหา workspace ที่ผู้ใช้เป็นเจ้าของหรือเป็นสมาชิก
     const workspaces = await Workspace.find({
       $or: [
-        { owner: req.user.id },  // เป็นเจ้าของ
-        { 'members.user': req.user.id }  // เป็นสมาชิก
+        { owner: req.user.id },
+        { "members.user": req.user.id }
       ]
     });
-    // console.log("Found workspaces:", workspaces);
-    res.json(workspaces);
-  } catch (err) {
-    console.error("Fetch workspaces error:", err);
-    res.status(500).json({ error: "Failed to fetch workspaces", message: err.message });
-  }
-});
 
-// 2. ดึงข้อมูล Workspace ตาม ID
-router.get("/:workspaceId", authenticateToken, async (req, res) => {
-  const { workspaceId } = req.params;
-
-  try {
-    const workspace = await Workspace.findById(workspaceId).populate("members.user");
-
-    if (!workspace) {
-      return res.status(404).json({ error: "Workspace not found" });
-    }
-
-    res.json(workspace);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch workspace", message: err.message });
-  }
-});
-
-// 3. เพิ่มสมาชิกใน workspace โดยใช้ email
-router.put("/:workspaceId/member", authenticateToken, async (req, res) => {
-  const { workspaceId } = req.params;
-  const { email } = req.body;  // ไม่มี role อีกแล้ว
-
-  if (!email) {
-    return res.status(400).json({ error: "Missing email" });
-  }
-
-  try {
-    // ค้นหาผู้ใช้จาก email
-    const user = await User.findOne({ email });
-
-    if (!user) {
-      return res.status(404).json({ error: "User with the given email not found" });
-    }
-
-    // ค้นหา workspace ตาม ID
-    const workspace = await Workspace.findById(workspaceId);
-
-    if (!workspace) {
-      return res.status(404).json({ error: "Workspace not found" });
-    }
-
-    // ตรวจสอบว่า user นี้อยู่ใน members ของ workspace หรือยัง
-    const isAlreadyMember = workspace.members.some(member => member.user.toString() === user._id.toString());
-    if (isAlreadyMember) {
-      return res.status(400).json({ error: "User is already a member of this workspace" });
-    }
-
-    // เพิ่มสมาชิกใหม่เข้า workspace โดยไม่ต้องใช้ role
-    workspace.members.push({
-      user: user._id,
-      join_at: new Date(),
+    res.status(200).json({
+      success: true,
+      message: "Workspaces retrieved successfully",
+      data: workspaces
     });
-
-    await workspace.save();
-    res.json(workspace);
   } catch (err) {
-    res.status(500).json({ error: "Failed to add member", message: err.message });
+    console.error(`Error fetching workspaces:`, {
+      error: err.message,
+      userId: req.user?.id
+    });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch workspaces",
+      error: err.message
+    });
   }
 });
 
-
-// 4. อัพเดตข้อมูล Workspace
-router.put("/:workspaceId", authenticateToken, async (req, res) => {
-  const { workspaceId } = req.params;
-  const { name, type, budget } = req.body;
-
+/**
+ * @route GET /api/workspaces/:workspaceId
+ * @desc Get workspace by ID
+ */
+router.get("/:workspaceId", [
+  authenticateToken,
+  validateUserId,
+  validateWorkspaceOperation,
+  checkWorkspaceAccessMiddleware
+], async (req, res) => {
   try {
-    const workspace = await Workspace.findById(workspaceId);
+    const workspace = req.workspace;
+    const populated = await workspace.populate("members.user");
 
-    if (!workspace) {
-      return res.status(404).json({ error: "Workspace not found" });
-    }
-    // ตรวจสอบว่า req.user มีข้อมูลหรือไม่
-    if (!req.user || !req.user.id) {
-      return res.status(400).json({ error: "User authentication data is incomplete" });
-    }
-
-    // ตรวจสอบว่า user เป็นเจ้าของ workspace หรือไม่
-    if (workspace.owner.toString() !== req.user.id.toString()) {
-      return res.status(403).json({ error: "You are not authorized to update this workspace" });
-    }
-
-    // อัพเดตข้อมูล workspace
-    workspace.name = name || workspace.name;
-    workspace.type = type || workspace.type;
-    workspace.budget = budget || workspace.budget;
-    workspace.update = new Date();
-
-    await workspace.save();
-    res.json(workspace);
+    res.status(200).json({
+      success: true,
+      message: "Workspace retrieved successfully",
+      data: populated
+    });
   } catch (err) {
-    res.status(500).json({ error: "Failed to update workspace", message: err.message });
+    console.error(`Error fetching workspace:`, {
+      error: err.message,
+      userId: req.user?.id,
+      workspaceId: req.params.workspaceId
+    });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch workspace",
+      error: err.message
+    });
   }
 });
 
-// 5. ลบสมาชิกออกจาก Workspace
-router.delete("/:workspaceId/member/:userId", authenticateToken, async (req, res) => {
-  const { workspaceId, userId } = req.params;
-
+/**
+ * @route PUT /api/workspaces/:workspaceId
+ * @desc Update workspace information
+ * @access Private - Owner only
+ */
+router.put("/:workspaceId", [
+  authenticateToken,
+  validateUserId,
+  validateWorkspaceOperation,
+  checkWorkspaceAccessMiddleware
+], async (req, res) => {
   try {
-    const workspace = await Workspace.findById(workspaceId);
+    const workspace = req.workspace;
+    const { name, type, budget } = req.body;
 
-    if (!workspace) {
-      return res.status(404).json({ error: "Workspace not found" });
+    // Validate owner
+    if (workspace.owner.toString() !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: "Only workspace owner can update workspace"
+      });
     }
 
-    // ตรวจสอบว่า user ที่จะลบออกเป็นสมาชิกใน workspace หรือไม่
-    const memberIndex = workspace.members.findIndex(member => member.user.toString() === userId);
+    // Update fields
+    if (name) workspace.name = name;
+    if (type) workspace.type = type;
+    if (budget) workspace.budget = Number(budget);
+    workspace.updatedAt = new Date();
+
+    await workspace.save();
+    const updated = await workspace.populate("members.user");
+
+    res.status(200).json({
+      success: true,
+      message: "Workspace updated successfully",
+      data: updated
+    });
+  } catch (err) {
+    console.error(`Error updating workspace:`, {
+      error: err.message,
+      userId: req.user?.id,
+      workspaceId: req.params.workspaceId
+    });
+    res.status(500).json({
+      success: false,
+      message: "Failed to update workspace",
+      error: err.message
+    });
+  }
+});
+
+/**
+ * @route POST /api/workspaces/:workspaceId/member
+ * @desc Add new member to workspace
+ * @access Private - Owner only
+ */
+router.post("/:workspaceId/member", [
+  authenticateToken,
+  validateUserId,
+  validateWorkspaceOperation,
+  checkWorkspaceAccessMiddleware
+], async (req, res) => {
+  try {
+    const workspace = req.workspace;
+    const { userId } = req.body;
+
+    // Validate owner
+    if (workspace.owner.toString() !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: "Only workspace owner can add members"
+      });
+    }
+
+    // Check if user exists
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    // Check if already member
+    const isAlreadyMember = workspace.members.some(
+      member => member.user.toString() === userId
+    );
+    if (isAlreadyMember) {
+      return res.status(400).json({
+        success: false,
+        message: "User is already a member"
+      });
+    }
+
+    // Add member
+    workspace.members.push({
+      user: userId,
+      join_at: new Date()
+    });
+    await workspace.save();
+
+    const updated = await workspace.populate("members.user");
+
+    res.status(200).json({
+      success: true,
+      message: "Member added successfully",
+      data: updated
+    });
+  } catch (err) {
+    console.error(`Error adding member:`, {
+      error: err.message,
+      userId: req.user?.id,
+      workspaceId: req.params.workspaceId,
+      memberId: req.body.userId
+    });
+    res.status(500).json({
+      success: false,
+      message: "Failed to add member",
+      error: err.message
+    });
+  }
+});
+
+/**
+ * @route DELETE /api/workspaces/:workspaceId/member/:userId
+ * @desc Remove member from workspace
+ * @access Private - Owner only
+ */
+router.delete("/:workspaceId/member/:userId", [
+  authenticateToken,
+  validateUserId,
+  validateWorkspaceOperation,
+  checkWorkspaceAccessMiddleware
+], async (req, res) => {
+  try {
+    const workspace = req.workspace;
+    const memberIdToRemove = req.params.userId;
+
+    // Validate owner
+    if (workspace.owner.toString() !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: "Only workspace owner can remove members"
+      });
+    }
+
+    // Prevent owner removal
+    if (memberIdToRemove === workspace.owner.toString()) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot remove workspace owner"
+      });
+    }
+
+    // Find and remove member
+    const memberIndex = workspace.members.findIndex(
+      member => member.user.toString() === memberIdToRemove
+    );
 
     if (memberIndex === -1) {
-      return res.status(400).json({ error: "User is not a member of this workspace" });
+      return res.status(404).json({
+        success: false,
+        message: "Member not found in workspace"
+      });
     }
 
-    // ลบสมาชิกออกจาก workspace
     workspace.members.splice(memberIndex, 1);
     await workspace.save();
-    res.json({ message: "User removed from workspace" });
+
+    res.status(200).json({
+      success: true,
+      message: "Member removed successfully",
+      data: workspace
+    });
   } catch (err) {
-    res.status(500).json({ error: "Failed to remove member", message: err.message });
+    console.error(`Error removing member:`, {
+      error: err.message,
+      userId: req.user?.id,
+      workspaceId: req.params.workspaceId,
+      memberToRemove: req.params.userId
+    });
+    res.status(500).json({
+      success: false,
+      message: "Failed to remove member",
+      error: err.message
+    });
   }
 });
 
-
-// 6. ลบ Workspace
-router.delete("/:workspaceId", authenticateToken, async (req, res) => {
-  const { workspaceId } = req.params;
-
+/**
+ * @route DELETE /api/workspaces/:workspaceId
+ * @desc Delete workspace
+ * @access Private - Owner only
+ */
+router.delete("/:workspaceId", [
+  authenticateToken, 
+  validateUserId,
+  validateWorkspaceOperation,
+  checkWorkspaceAccessMiddleware
+], async (req, res) => {
   try {
-    const workspace = await Workspace.findById(workspaceId);
+    const workspace = req.workspace;
 
-    if (!workspace) {
-      return res.status(404).json({ error: "Workspace not found" });
+    // Validate owner
+    if (workspace.owner.toString() !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: "Only workspace owner can delete workspace"
+      });
     }
 
-    // ตรวจสอบว่า req.user มีข้อมูลหรือไม่
-    if (!req.user || !req.user.id) {
-      return res.status(400).json({ error: "User authentication data is incomplete" });
-    }
+    await workspace.deleteOne();
 
-    // ตรวจสอบว่า user เป็นเจ้าของ workspace หรือไม่
-    if (workspace.owner.toString() !== req.user.id.toString()) {
-      return res.status(403).json({ error: "You are not authorized to delete this workspace" });
-    }
-
-    // ใช้ deleteOne() แทน delete()
-    await Workspace.deleteOne({ _id: workspaceId });
-    // หรือใช้ findByIdAndDelete
-    // await Workspace.findByIdAndDelete(workspaceId);
-
-    res.json({ message: "Workspace deleted" });
+    res.status(200).json({
+      success: true,
+      message: "Workspace deleted successfully",
+      data: null
+    });
   } catch (err) {
-    console.error("Delete workspace error:", err);
-    res.status(500).json({ error: "Failed to delete workspace", message: err.message });
+    console.error(`Error deleting workspace:`, {
+      error: err.message,
+      userId: req.user?.id,
+      workspaceId: req.params.workspaceId
+    });
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete workspace",
+      error: err.message
+    });
   }
 });
 

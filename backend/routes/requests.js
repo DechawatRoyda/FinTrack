@@ -30,7 +30,10 @@ const upload = multer({ storage: storage });
 
 const AZURE_BLOB_DOMAIN = "https://fintrack101.blob.core.windows.net";
 
-// 1️⃣ ขอเบิกงบประมาณ
+/**
+ * @route POST /api/workspaces/:workspaceId/requests
+ * @desc สร้างคำขอเบิกงบประมาณในเวิร์คสเปซที่ระบุ
+ */
 router.post(
   "/",
   [
@@ -39,13 +42,14 @@ router.post(
     checkProjectWorkspace,
     validateRequestItems,
     validateRequesterProof,
-    upload.single("requesterProof"), // เพิ่ม multer
+    upload.single("requesterProof"),
   ],
   async (req, res) => {
     try {
-      const { amount, items, requesterProof } = req.body;
       const workspace = req.workspaceId; // จาก middleware
-      const userId = getUserId(req.user); // ใช้ userId จาก token
+      const userId = getUserId(req.user);
+      const { amount, items, requesterProof } = req.body;
+
       // อัพโหลดไฟล์ไปยัง Azure Blob ถ้ามีไฟล์แนบมา
       let requesterProofUrl = null;
       if (req.file) {
@@ -58,12 +62,13 @@ router.post(
           userId: userId.toString(),
           workspaceId: workspace.toString(),
           type: "requester-proof",
-          contentType: req.file.mimetype // เพิ่มบรรทัดนี้
+          contentType: req.file.mimetype,
         });
       }
+
       const request = new Request({
         workspace,
-        requester: userId, // ใช้ userId จาก token
+        requester: userId,
         amount,
         items,
         requesterProof: requesterProofUrl || req.body.requesterProof,
@@ -78,9 +83,56 @@ router.post(
         data: request,
       });
     } catch (err) {
+      console.error(`Error in create request:`, {
+        error: err.message,
+        stack: err.stack,
+        userId: req.userId,
+        workspace: req.workspaceId,
+      });
       res.status(500).json({
         success: false,
         message: "Failed to create request",
+        error: err.message,
+      });
+    }
+  }
+);
+
+/**
+ * @route GET /api/workspaces/:workspaceId/requests
+ * @desc Get all requests in workspace
+ */
+
+// 2️⃣ ดึงรายการขอเบิกงบของ Workspace (GET /requests/:workspaceId)
+router.get(
+  "/",
+  [authenticateToken, checkWorkspaceAccessMiddleware],
+  async (req, res) => {
+    const workspace = req.workspaceId; // ✅ ใช้จาก middleware
+
+    try {
+      const requests = await Request.find({ workspace })
+        .populate("requester", "name email")
+        .populate("workspace", "name type")
+        .sort({ createdAt: -1 }); // เพิ่ม sorting
+
+      if (!requests.length) {
+        return res.status(404).json({
+          success: false,
+          message: "No requests found for this workspace",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Requests retrieved successfully",
+        data: requests,
+      });
+    } catch (err) {
+      console.error(`Error in ${req.method} ${req.originalUrl}:`, err);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch requests",
         error: err.message,
       });
     }
@@ -94,7 +146,7 @@ router.post(
 
 // 2.1️⃣ ดึงรายละเอียดคำขอเบิกงบตาม ID
 router.get(
-  "/detail/:requestId",
+  "/:id",
   [authenticateToken, checkRequestStatus],
   async (req, res) => {
     const userId = getUserId(req.user);
@@ -146,47 +198,8 @@ router.get(
         success: false,
         message: "Failed to fetch request details",
         error: err.message,
-      });
-    }
-  }
-);
-
-/**
- * @route GET /api/requests/:workspaceId
- * @desc Get all requests in workspace
- */
-
-// 2️⃣ ดึงรายการขอเบิกงบของ Workspace (GET /requests/:workspaceId)
-router.get(
-  "/:workspaceId",
-  [authenticateToken, checkWorkspaceAccessMiddleware],
-  async (req, res) => {
-    const { workspaceId } = req.params;
-
-    try {
-      const requests = await Request.find({ workspace: workspaceId })
-        .populate("requester", "name email")
-        .populate("workspace", "name type")
-        .sort({ createdAt: -1 }); // เพิ่ม sorting
-
-      if (!requests.length) {
-        return res.status(404).json({
-          success: false,
-          message: "No requests found for this workspace",
-        });
-      }
-
-      res.status(200).json({
-        success: true,
-        message: "Requests retrieved successfully",
-        data: requests,
-      });
-    } catch (err) {
-      console.error(`Error in ${req.method} ${req.originalUrl}:`, err);
-      res.status(500).json({
-        success: false,
-        message: "Failed to fetch requests",
-        error: err.message,
+        userId,
+        requestId: req.params.id, // ✅ เพิ่ม requestId ในการ log
       });
     }
   }
@@ -197,7 +210,7 @@ router.get(
  * @desc Edit request by requester (only when status is pending)
  */
 router.put(
-  "/:requestId/edit",
+  "/:id",
   [
     authenticateToken,
     checkRequestStatus,
@@ -252,6 +265,8 @@ router.put(
         success: false,
         message: "Failed to update request",
         error: err.message,
+        userId,
+        requestId: req.params.id, // ✅ เพิ่ม requestId ในการ log
       });
     }
   }
@@ -263,7 +278,7 @@ router.put(
  */
 // 3️⃣ อนุมัติ/ปฏิเสธคำขอ และแนบสลิป (PUT /requests/:requestId/status)
 router.put(
-  "/:requestId/status",
+  "/:id/status",
   [
     authenticateToken,
     checkRequestStatus,
@@ -411,6 +426,8 @@ router.put(
         success: false,
         message: "Failed to update request status",
         error: err.message,
+        userId,
+        requestId: req.params.id, // ✅ เพิ่ม requestId ในการ log
       });
     }
   }
@@ -418,7 +435,7 @@ router.put(
 
 // 4️⃣ ลบคำขอเบิกงบ (DELETE /requests/:requestId)
 router.delete(
-  "/:requestId",
+  "/:id",
   [authenticateToken, checkRequestStatus, checkProjectWorkspace],
   async (req, res) => {
     const userId = getUserId(req.user);
@@ -471,6 +488,8 @@ router.delete(
         success: false,
         message: "Failed to delete request",
         error: err.message,
+        requestId: req.params.id, // ✅ เพิ่ม requestId ในการ log
+        workspace: req.workspaceId, // ✅ เพิ่ม workspace ในการ log
       });
     }
   }

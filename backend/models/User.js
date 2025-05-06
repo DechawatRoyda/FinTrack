@@ -23,7 +23,7 @@ const userSchema = new mongoose.Schema({
   },
   numberAccount: {
     type: String,
-    required: true, // หมายเลขบัญชีที่ใช้จ่าย
+    required: false, // หมายเลขบัญชีที่ใช้จ่าย
     unique: true,
     trim: true,
   },
