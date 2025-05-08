@@ -63,14 +63,58 @@ export const validateBillCreation = (req, res, next) => {
 
 // ตรวจสอบข้อมูลการชำระเงิน
 export const validatePayment = (req, res, next) => {
-  const { eslipUrl, itemId } = req.body;
+  // เช็คว่ามี itemId และไฟล์แนบ
+  const itemId = req.body.itemId;
 
-  if (!eslipUrl || !itemId) {
+  // เช็คว่ามีไฟล์แนบหรือไม่ (form-data)
+  const hasFile = !!req.file;
+
+  if (!itemId) {
     return res.status(400).json({
       success: false,
-      message: "Missing eSlip URL or item ID",
+      message: "Item ID is required",
+    });
+  }
+
+  // กรณี form-data ต้องมีไฟล์แนบ
+  if (!hasFile) {
+    return res.status(400).json({
+      success: false,
+      message: "Payment evidence (eSlip) is required",
     });
   }
 
   next();
+};
+
+export const validateConfirmPayment = async (req, res, next) => {
+  try {
+    // Log ข้อมูลที่ได้รับ
+    console.log('Validating confirm payment:', {
+      body: req.body,
+      contentType: req.headers['content-type']
+    });
+
+    const { itemId, userIdToConfirm } = req.body;
+
+    if (!itemId || !userIdToConfirm) {
+      return res.status(400).json({
+        success: false,
+        message: "itemId and userIdToConfirm are required",
+        debug: {
+          receivedBody: req.body,
+          contentType: req.headers['content-type']
+        }
+      });
+    }
+
+    next();
+  } catch (err) {
+    console.error('Validation error:', err);
+    return res.status(400).json({
+      success: false,
+      message: "Invalid request data",
+      error: err.message
+    });
+  }
 };

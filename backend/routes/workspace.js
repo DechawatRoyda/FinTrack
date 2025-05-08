@@ -29,17 +29,36 @@ router.post("/", [
       });
     }
 
+    // เพิ่มการค้นหา User จาก Email
+    let memberUsers = [];
+    if (members?.length) {
+      try {
+        memberUsers = await Promise.all(
+          members.map(async (member) => {
+            const user = await User.findOne({ email: member.email });
+            if (!user) {
+              throw new Error(`User with email ${member.email} not found`);
+            }
+            return {
+              user: user._id,
+              join_at: new Date()
+            };
+          })
+        );
+      } catch (error) {
+        return res.status(404).json({
+          success: false,
+          message: error.message
+        });
+      }
+    }
+
     const workspace = new Workspace({
       name,
       owner,
       type,
       budget: budget || 0,
-      members: members?.length 
-        ? members.map(member => ({
-            user: member.user,
-            join_at: new Date()
-          }))
-        : [{ user: owner, join_at: new Date() }],
+      members: memberUsers.length ? memberUsers : [{ user: owner, join_at: new Date() }],
       createdAt: new Date(),
       updatedAt: new Date()
     });

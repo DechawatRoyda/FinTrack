@@ -59,4 +59,43 @@ router.post("/verify-register", verifyOTP, async (req, res) => {
   }
 });
 
+
+// Reset Password OTP Request
+router.post("/reset-password-request", async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required"
+      });
+    }
+
+    // เช็คว่ามีอีเมลในระบบหรือไม่
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "Email not found"
+      });
+    }
+
+    // ส่ง OTP สำหรับ reset password
+    await otpService.sendOTP(email, 'reset-password');
+
+    res.json({
+      success: true,
+      message: "Password reset OTP sent successfully",
+      expiresIn: "5 minutes"
+    });
+  } catch (error) {
+    console.error("Reset password OTP error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to send reset password OTP"
+    });
+  }
+});
+
 export default router;

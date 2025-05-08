@@ -15,11 +15,14 @@ import adminRoutes from "./routes/admins.js";
 import { cleanupExpiredSessions } from './middleware/sessionCleanup.js';
 import otpRoutes from './routes/otp.js';
 
+
 dotenv.config(); // โหลด environment variables
 const app = express();
 
+
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // ใช้ environment variable สำหรับ MongoDB URI
 const dbURI = process.env.MONGO_URI;
@@ -47,9 +50,32 @@ app.use("/api/workspaces", workspaceRoutes); // เพิ่มเส้นท�
 
 app.use("/api/ocrslip", ocrSlipRoutes);
 
-app.use("/api/workspaces/:workspaceId/bills", billRoutes);
+// แก้ไขการกำหนด route bills
+app.use("/api/workspaces/:workspaceId/bills", (req, res, next) => {
+  // ต้องแน่ใจว่าได้ส่ง workspaceId ไปให้ bills route
+  const workspaceId = req.params.workspaceId;
+  if (!workspaceId) {
+    return res.status(400).json({
+      success: false,
+      message: "Workspace ID is required"
+    });
+  }
+  req.workspaceId = workspaceId;
+  next();
+}, billRoutes);
 
-app.use("/api/workspaces/:workspaceId/requests", requestRoutes);
+app.use("/api/workspaces/:workspaceId/requests", (req, res, next) => {
+  // ต้องแน่ใจว่าได้ส่ง workspaceId ไปให้ requests route  
+  const workspaceId = req.params.workspaceId;
+  if (!workspaceId) {
+    return res.status(400).json({
+      success: false,
+      message: "Workspace ID is required"
+    });
+  }
+  req.workspaceId = workspaceId;
+  next();
+}, requestRoutes);
 
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.url}`);

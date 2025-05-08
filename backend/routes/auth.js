@@ -4,13 +4,32 @@ import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import Session from "../models/Session.js"; // Add this import
 import dotenv from "dotenv";
-import { authenticateToken, validateUserId  } from "../middleware/auth.js";
+import { authenticateToken, validateUserId } from "../middleware/auth.js";
 import { checkAdminRole, checkUserAccess } from "../middleware/adminAuth.js";
 import otpService from "../services/OtpService.js";
+import multer from "multer";  // Add this
+import {
+  validateEmailFormat,
+  validatePasswordStrength,
+  validateUsername,
+} from "../middleware/validation.js";
+// import rateLimit from 'express-rate-limit'; เอาไว้ใช้จำกัดจำนวนการ login ในช่วงเวลาหนึ่ง
+
+// export const loginLimiter = rateLimit({
+//   windowMs: 15 * 60 * 1000, // 15 minutes
+//   max: 5, // 5 attempts
+//   message: {
+//     success: false,
+//     message: "Too many login attempts, please try again later"
+//   }
+// });
+// router.post("/login", [loginLimiter], async (req, res) => {...});
 
 dotenv.config(); // โหลดค่าจาก .env
 
 const router = express.Router();
+const storage = multer.memoryStorage();
+const upload = multer({ storage });  // Add this
 const JWT_SECRET = process.env.JWT_SECRET;
 
 // Middleware ตรวจสอบว่ามีค่าตัวแปร JWT_SECRET หรือไม่
@@ -20,114 +39,130 @@ if (!JWT_SECRET) {
 }
 
 // 📌 Register Route
-router.post("/register", async (req, res) => {
-  try {
-    const {
-      username,
-      password,
-      confirmPassword,
-      name,
-      email,
-      otp,
-      // Optional fields
-      phone,
-      numberAccount,
-      max_limit_expense,
-      avatar_url
-    } = req.body;
+router.post(
+  "/register",
+  validateEmailFormat,
+  validatePasswordStrength,
+  validateUsername,
+  async (req, res) => {
+    try {
+      const {
+        username,
+        password,
+        confirmPassword,
+        name,
+        email,
+        otp,
+        // Optional fields
+        phone,
+        numberAccount,
+        max_limit_expense,
+        avatar_url,
+      } = req.body;
 
-    // ✅ ตรวจสอบเฉพาะฟิลด์ที่จำเป็น
-    if (!username || !password || !confirmPassword || !name || !email || !otp) {
-      return res.status(400).json({ 
-        success: false,
-        message: "Required fields are missing",
-        requiredFields: ['username', 'password', 'confirmPassword', 'name', 'email', 'otp']
-      });
-    }
-
-    // ✅ ตรวจสอบ OTP
-    const otpVerification = otpService.verifyOTP(email, otp);
-    if (!otpVerification.success) {
-      return res.status(400).json({
-        success: false,
-        message: otpVerification.message
-      });
-    }
-
-    // ✅ ตรวจสอบ password
-    if (password !== confirmPassword) {
-      return res.status(400).json({ 
-        success: false,
-        message: "Passwords do not match" 
-      });
-    }
-
-    // ✅ ตรวจสอบค่าที่ซ้ำ (เฉพาะ required fields)
-    const duplicateQuery = {
-      $or: [
-        { username: username },
-        { email: email }
-      ]
-    };
-
-    const duplicateChecks = await User.findOne(duplicateQuery);
-
-    if (duplicateChecks) {
-      const errors = [];
-      if (duplicateChecks.username === username) {
-        errors.push("Username is already taken");
+      // ✅ ตรวจสอบเฉพาะฟิลด์ที่จำเป็น
+      if (
+        !username ||
+        !password ||
+        !confirmPassword ||
+        !name ||
+        !email ||
+        !otp
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Required fields are missing",
+          requiredFields: [
+            "username",
+            "password",
+            "confirmPassword",
+            "name",
+            "email",
+            "otp",
+          ],
+        });
       }
-      if (duplicateChecks.email === email) {
-        errors.push("Email is already registered");
+
+      // ✅ ตรวจสอบ OTP
+      const otpVerification = otpService.verifyOTP(email, otp);
+      if (!otpVerification.success) {
+        return res.status(400).json({
+          success: false,
+          message: otpVerification.message,
+        });
       }
-      return res.status(400).json({
+
+      // ✅ ตรวจสอบ password
+      if (password !== confirmPassword) {
+        return res.status(400).json({
+          success: false,
+          message: "Passwords do not match",
+        });
+      }
+
+      // ✅ ตรวจสอบค่าที่ซ้ำ (เฉพาะ required fields)
+      const duplicateQuery = {
+        $or: [{ username: username }, { email: email }],
+      };
+
+      const duplicateChecks = await User.findOne(duplicateQuery);
+
+      if (duplicateChecks) {
+        const errors = [];
+        if (duplicateChecks.username === username) {
+          errors.push("Username is already taken");
+        }
+        if (duplicateChecks.email === email) {
+          errors.push("Email is already registered");
+        }
+        return res.status(400).json({
+          success: false,
+          message: "Duplicate values found",
+          details: errors,
+        });
+      }
+
+      // ✅ Hash password
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // ✅ สร้าง user object (เฉพาะฟิลด์ที่มีค่า)
+      const userData = {
+        username,
+        password: hashedPassword,
+        name,
+        email,
+      };
+
+      // เพิ่มฟิลด์เสริมถ้ามีค่า
+      if (phone) userData.phone = phone;
+      if (numberAccount) userData.numberAccount = numberAccount;
+      if (max_limit_expense) userData.max_limit_expense = max_limit_expense;
+      if (avatar_url) userData.avatar_url = avatar_url;
+
+      const newUser = new User(userData);
+      await newUser.save();
+
+      res.status(201).json({
+        success: true,
+        message: "User registered successfully",
+      });
+    } catch (err) {
+      console.error("Registration error:", err);
+      if (err.code === 11000) {
+        const field = Object.keys(err.keyPattern)[0];
+        return res.status(400).json({
+          success: false,
+          message: "Duplicate value",
+          details: [`${field} is already registered`],
+        });
+      }
+      res.status(500).json({
         success: false,
-        message: "Duplicate values found",
-        details: errors
+        message: "Internal server error",
       });
     }
-
-    // ✅ Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // ✅ สร้าง user object (เฉพาะฟิลด์ที่มีค่า)
-    const userData = {
-      username,
-      password: hashedPassword,
-      name,
-      email
-    };
-
-    // เพิ่มฟิลด์เสริมถ้ามีค่า
-    if (phone) userData.phone = phone;
-    if (numberAccount) userData.numberAccount = numberAccount;
-    if (max_limit_expense) userData.max_limit_expense = max_limit_expense;
-    if (avatar_url) userData.avatar_url = avatar_url;
-
-    const newUser = new User(userData);
-    await newUser.save();
-
-    res.status(201).json({
-      success: true,
-      message: "User registered successfully"
-    });
-
-  } catch (err) {
-    console.error("Registration error:", err);
-    if (err.code === 11000) {
-      const field = Object.keys(err.keyPattern)[0];
-      return res.status(400).json({
-        success: false,
-        message: "Duplicate value",
-        details: [`${field} is already registered`]
-      });
-    }
-    res.status(500).json({ 
-      success: false,
-      message: "Internal server error" 
-    });
   }
-});
+);
 
 // 📌 Login Route
 router.post("/login", async (req, res) => {
@@ -136,57 +171,108 @@ router.post("/login", async (req, res) => {
 
     // ✅ ตรวจสอบว่ากรอกข้อมูลครบหรือไม่
     if (!username || !password) {
-      return res.status(400).json({ error: "Username, password are required" });
+      return res.status(400).json({
+        success: false,
+        message: "Username and password are required",
+      });
     }
 
-    // 1. ค้นหา user จาก username ก่อน
+    // ✅ ค้นหา user และตรวจสอบสถานะ
     const user = await User.findOne({ username });
     if (!user) {
-      return res.status(400).json({ error: "Invalid credentials" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid credentials",
+      });
+    }
+
+    // ✅ ตรวจสอบว่าบัญชีถูกระงับหรือไม่
+    if (user.isActive === false) {
+      return res.status(403).json({
+        success: false,
+        message: "Account is suspended. Please contact administrator.",
+      });
     }
 
     // ✅ ตรวจสอบรหัสผ่าน
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(400).json({ error: "Invalid username or password" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid credentials",
+      });
     }
 
-    // ✅ สร้าง JWT token
+    // ✅ สร้าง access token (อายุสั้น)
     const token = jwt.sign(
       {
         id: user._id,
-        role: user.role, // เพิ่ม role ใน token
+        role: user.role,
+        type: "access",
       },
       JWT_SECRET,
-      {
-        expiresIn: "1h",
-      }
+      { expiresIn: "1h" }
     );
 
-    // Save session
-    await Session.create({
+    // ✅ สร้าง refresh token (อายุยาว)
+    const refreshToken = jwt.sign(
+      {
+        id: user._id,
+        type: "refresh",
+      },
+      JWT_SECRET,
+      { expiresIn: "30d" }
+    );
+
+    // ✅ ยกเลิก sessions เก่าที่ไม่ได้ใช้งาน
+    await Session.updateMany(
+      {
+        userId: user._id,
+        lastActivity: { $lt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+      },
+      { isValid: false }
+    );
+
+    // ✅ สร้าง session ใหม่
+    const session = await Session.create({
       userId: user._id,
       token,
+      refreshToken,
+      lastActivity: new Date(),
+      userAgent: req.headers["user-agent"],
+      ipAddress: req.ip,
     });
 
-    // เพิ่มข้อมูลที่ส่งกลับไปให้รวม numberAccount ด้วย
+    // ✅ อัพเดทเวลาเข้าสู่ระบบล่าสุด
+    user.lastLogin = new Date();
+    await user.save();
+
+    // ✅ ส่งข้อมูลตอบกลับ
     res.json({
       success: true,
       message: "Login successful",
       data: {
         token,
+        refreshToken,
         user: {
           id: user._id,
           username: user.username,
           name: user.name,
           role: user.role,
-          numberAccount: user.numberAccount || null, // เพิ่ม null fallback
-          hasNumberAccount: !!user.numberAccount // เพิ่มฟิลด์แสดงสถานะว่ามีเลขบัญชีหรือไม่
+          email: user.email,
+          avatar_url: user.avatar_url,
+          numberAccount: user.numberAccount || null,
+          hasNumberAccount: !!user.numberAccount,
+          lastLogin: user.lastLogin,
+        },
+        session: {
+          id: session._id,
+          createdAt: session.createdAt,
         },
       },
     });
   } catch (err) {
-    console.error("Login error:", err); // Add detailed logging
+    console.error("Login error:", err);
     res.status(500).json({
       success: false,
       message: "Login failed",
@@ -195,27 +281,194 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// 📌 Logout Route
-router.post("/logout", authenticateToken, async (req, res) => {
+// 📌 Refresh Token Route
+router.post("/refresh-token", async (req, res) => {
   try {
-    // Invalidate the current session
-    await Session.findOneAndUpdate(
-      { userId: req.user.id, isValid: true },
-      { isValid: false }
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(400).json({
+        success: false,
+        message: "Refresh token is required",
+      });
+    }
+
+    // ✅ ตรวจสอบและถอดรหัส refresh token
+    const decoded = jwt.verify(refreshToken, JWT_SECRET);
+    if (decoded.type !== "refresh") {
+      throw new Error("Invalid token type");
+    }
+
+    // ✅ ค้นหา session ที่ตรงกับ refresh token
+    const session = await Session.findOne({
+      userId: decoded.id,
+      refreshToken,
+      isValid: true,
+    });
+
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired session",
+      });
+    }
+
+    // ✅ ค้นหาข้อมูล user
+    const user = await User.findById(decoded.id);
+    if (!user || user.isActive === false) {
+      return res.status(401).json({
+        success: false,
+        message: "User not found or account is suspended",
+      });
+    }
+
+    // ✅ สร้าง access token ใหม่
+    const newToken = jwt.sign(
+      {
+        id: user._id,
+        role: user.role,
+        type: "access",
+      },
+      JWT_SECRET,
+      { expiresIn: "1h" }
     );
+
+    // ✅ อัพเดท session
+    session.token = newToken;
+    session.lastActivity = new Date();
+    await session.save();
 
     res.json({
       success: true,
-      message: "Logged out successfully",
+      data: {
+        token: newToken,
+        user: {
+          id: user._id,
+          username: user.username,
+          name: user.name,
+          role: user.role,
+        },
+      },
     });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({
+  } catch (error) {
+    console.error("Token refresh error:", error);
+    res.status(401).json({
       success: false,
-      message: "Failed to logout",
+      message: "Invalid refresh token",
+      error: error.message,
     });
   }
 });
+
+// 📌 Logout Route
+router.post("/logout", authenticateToken, async (req, res) => {
+  try {
+    // หา token จาก header
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: "No token provided"
+      });
+    }
+
+    // ยกเลิก session ที่ตรงกับ token นี้
+    const result = await Session.findOneAndUpdate(
+      { 
+        userId: req.user.id,
+        token: token,
+        isValid: true 
+      },
+      { isValid: false },
+      { new: true }
+    );
+
+    if (!result) {
+      return res.status(404).json({
+        success: false,
+        message: "Session not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Logged out successfully"
+    });
+
+  } catch (err) {
+    console.error("Logout error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to logout",
+      error: err.message
+    });
+  }
+});
+
+// Reset Password Route
+router.post(
+  "/reset-password",
+  validateEmailFormat,
+  validatePasswordStrength,
+  async (req, res) => {
+    try {
+      const { email, otp, newPassword, confirmPassword } = req.body;
+
+      // ตรวจสอบข้อมูลที่จำเป็น
+      if (!email || !otp || !newPassword || !confirmPassword) {
+        return res.status(400).json({
+          success: false,
+          message: "All fields are required",
+          requiredFields: ["email", "otp", "newPassword", "confirmPassword"],
+        });
+      }
+
+      // ตรวจสอบ password match
+      if (newPassword !== confirmPassword) {
+        return res.status(400).json({
+          success: false,
+          message: "Passwords do not match",
+        });
+      }
+
+      // ตรวจสอบ OTP
+      const otpVerification = otpService.verifyOTP(email, otp);
+      if (!otpVerification.success) {
+        return res.status(400).json({
+          success: false,
+          message: otpVerification.message,
+        });
+      }
+
+      // หา user จาก email
+      const user = await User.findOne({ email });
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found",
+        });
+      }
+
+      // Hash password ใหม่
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      user.password = hashedPassword;
+      await user.save();
+
+      res.json({
+        success: true,
+        message: "Password reset successfully",
+      });
+    } catch (error) {
+      console.error("Reset password error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to reset password",
+        error: error.message,
+      });
+    }
+  }
+);
 
 // 📌 Check Session Route
 router.get("/check-session", authenticateToken, async (req, res) => {
@@ -288,106 +541,159 @@ router.get(
 );
 
 // 📌 Edit Profile Route
-router.put("/profile", authenticateToken,validateUserId, async (req, res) => {
-  try {
-    const {
-      name,
-      email,
-      phone,
-      numberAccount,
-      max_limit_expense,
-      avatar_url,
-      currentPassword,
-      newPassword
-    } = req.body;
+router.put(
+  "/profile",
+  [
+    authenticateToken,
+    validateUserId,
+    validateEmailFormat,
+    upload.single("avatar"), // รับไฟล์รูปโปรไฟล์
+  ],
+  async (req, res) => {
+    try {
+      const {
+        name,
+        email,
+        phone,
+        numberAccount,
+        max_limit_expense,
+        currentPassword,
+        newPassword,
+      } = req.body;
 
-    // Find user by ID (from token)
-    const user = await User.findById(req.user.id);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // Check for duplicate email or account number
-    if (email !== user.email || numberAccount !== user.numberAccount) {
-      const duplicateCheck = await User.findOne({
-        $and: [
-          { _id: { $ne: req.user.id } },
-          {
-            $or: [
-              { email: email },
-              { numberAccount: numberAccount }
-            ]
-          }
-        ]
-      });
-
-      if (duplicateCheck) {
-        const errors = [];
-        if (duplicateCheck.email === email) {
-          errors.push("Email is already registered");
-        }
-        if (duplicateCheck.numberAccount === numberAccount) {
-          errors.push("Account number is already registered");
-        }
-        return res.status(400).json({
-          error: "Duplicate values found",
-          details: errors
+      // Find user by ID (from token)
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found",
         });
       }
-    }
 
-    // Validate max_limit_expense if provided
-    if (max_limit_expense) {
-      const max_limit = Number(max_limit_expense);
-      if (isNaN(max_limit)) {
-        return res.status(400).json({ error: "max_limit_expense must be a number" });
+      // Handle avatar upload if provided
+      if (req.file) {
+        try {
+          // Delete old avatar if exists
+          if (user.avatar_url?.includes("blob.core.windows.net")) {
+            try {
+              await deleteFromAzureBlob(user.avatar_url);
+            } catch (error) {
+              console.error("Error deleting old avatar:", error);
+            }
+          }
+
+          // Upload new avatar
+          const blobPath = `avatars/${user._id}/${Date.now()}-${
+            req.file.originalname
+          }`;
+          const avatarUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
+            userId: user._id.toString(),
+            type: "avatar",
+            contentType: req.file.mimetype,
+          });
+          user.avatar_url = avatarUrl;
+        } catch (uploadError) {
+          console.error("Avatar upload error:", uploadError);
+          return res.status(500).json({
+            success: false,
+            message: "Failed to upload avatar",
+            error: uploadError.message,
+          });
+        }
       }
-    }
 
-    // Handle password change if requested
-    if (currentPassword && newPassword) {
-      // Verify current password
-      const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
-      if (!isPasswordValid) {
-        return res.status(400).json({ error: "Current password is incorrect" });
+      // Check for duplicate email or account number
+      if (email !== user.email || numberAccount !== user.numberAccount) {
+        const duplicateCheck = await User.findOne({
+          $and: [
+            { _id: { $ne: req.user.id } },
+            {
+              $or: [{ email: email }, { numberAccount: numberAccount }],
+            },
+          ],
+        });
+
+        if (duplicateCheck) {
+          const errors = [];
+          if (duplicateCheck.email === email) {
+            errors.push("Email is already registered");
+          }
+          if (duplicateCheck.numberAccount === numberAccount) {
+            errors.push("Account number is already registered");
+          }
+          return res.status(400).json({
+            success: false,
+            message: "Duplicate values found",
+            details: errors,
+          });
+        }
       }
-      // Hash new password
-      user.password = await bcrypt.hash(newPassword, 10);
-    }
 
-    // Update user fields
-    user.name = name || user.name;
-    user.email = email || user.email;
-    user.phone = phone || user.phone;
-    user.numberAccount = numberAccount || user.numberAccount;
-    user.max_limit_expense = max_limit_expense || user.max_limit_expense;
-    user.avatar_url = avatar_url || user.avatar_url;
-
-    // Save updated user
-    await user.save();
-
-    // Return updated user data (excluding password)
-    const updatedUser = await User.findById(req.user.id).select("-password");
-
-    res.json({
-      success: true,
-      message: "Profile updated successfully",
-      data: {
-        user: updatedUser
+      // Validate max_limit_expense if provided
+      if (max_limit_expense) {
+        const max_limit = Number(max_limit_expense);
+        if (isNaN(max_limit)) {
+          return res.status(400).json({
+            success: false,
+            message: "max_limit_expense must be a number",
+          });
+        }
       }
-    });
 
-  } catch (err) {
-    console.error("Profile update error:", err);
-    if (err.code === 11000) {
-      const field = Object.keys(err.keyPattern)[0];
-      return res.status(400).json({
-        error: "Duplicate value",
-        details: [`${field} is already registered`]
+      // Handle password change if requested
+      if (currentPassword && newPassword) {
+        // Verify current password
+        const isPasswordValid = await bcrypt.compare(
+          currentPassword,
+          user.password
+        );
+        if (!isPasswordValid) {
+          return res.status(400).json({
+            success: false,
+            message: "Current password is incorrect",
+          });
+        }
+        // Hash new password
+        user.password = await bcrypt.hash(newPassword, 10);
+      }
+
+      // Update user fields
+      if (name) user.name = name;
+      if (email) user.email = email;
+      if (phone) user.phone = phone;
+      if (numberAccount) user.numberAccount = numberAccount;
+      if (max_limit_expense) user.max_limit_expense = Number(max_limit_expense);
+
+      // Save updated user
+      await user.save();
+
+      // Return updated user data (excluding password)
+      const updatedUser = await User.findById(req.user.id).select("-password");
+
+      res.json({
+        success: true,
+        message: "Profile updated successfully",
+        data: {
+          user: updatedUser,
+        },
+      });
+    } catch (err) {
+      console.error("Profile update error:", err);
+      if (err.code === 11000) {
+        const field = Object.keys(err.keyPattern)[0];
+        return res.status(400).json({
+          success: false,
+          message: "Duplicate value",
+          details: [`${field} is already registered`],
+        });
+      }
+      res.status(500).json({
+        success: false,
+        message: "Failed to update profile",
+        error: err.message,
       });
     }
-    res.status(500).json({ error: "Failed to update profile" });
   }
-});
+);
 
 export default router;

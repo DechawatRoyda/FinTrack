@@ -1,5 +1,6 @@
 import Workspace from "../models/Workspace.js";
 import { getUserId } from "./workspaceAuth.js";
+import Request from "../models/Request.js";
 
 // ตรวจสอบว่าเป็น Project Workspace
 export const checkProjectWorkspace = async (req, res, next) => {
@@ -47,10 +48,12 @@ export const checkWorkspaceOwner = async (req, res, next) => {
 // ตรวจสอบสถานะ Request
 export const checkRequestStatus = async (req, res, next) => {
   try {
-    const { requestId } = req.params;
-    const request = await Request.findById(requestId)
-      .populate('workspace')
-      .populate('requester');
+    const request = await Request.findById(req.params.id)
+      .populate({
+        path: 'workspace',
+        populate: { path: 'owner', select: 'name email' }
+      })
+      .populate('requester', 'name email');
     
     if (!request) {
       return res.status(404).json({

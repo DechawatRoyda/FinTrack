@@ -27,44 +27,40 @@ export const checkWorkspaceAccess = async (workspaceId, userId) => {
   }
 };
 
-// Middleware to check workspace access
 export const checkWorkspaceAccessMiddleware = async (req, res, next) => {
   try {
     const userId = getUserId(req.user);
     if (!userId) {
-      return res.status(401).json({ error: "User authentication failed" });
+      return res.status(401).json({
+        success: false,
+        message: "User ID not found"
+      });
     }
 
-    // ดึง workspaceId จากหลายที่ที่เป็นไปได้
-    let workspaceId = req.body.workspace || req.params.workspaceId;
-    
-    // ถ้าไม่มี workspaceId ในทั้ง body และ params ให้ลองดึงจาก bill
-    if (!workspaceId && req.params.billId) {
-      const bill = await Bill.findById(req.params.billId);
-      if (!bill) {
-        return res.status(404).json({ error: "Bill not found" });
-      }
-      workspaceId = bill.workspace;
-    }
-
+    // ใช้ workspaceId ที่ถูกส่งมาจาก server.js
+    const workspaceId = req.workspaceId;
     if (!workspaceId) {
-      return res.status(400).json({ error: "Workspace ID is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Workspace ID is required"
+      });
     }
 
     const hasAccess = await checkWorkspaceAccess(workspaceId, userId);
     if (!hasAccess) {
-      return res.status(403).json({ 
-        error: "You don't have permission to access this workspace" 
+      return res.status(403).json({
+        success: false,
+        message: "Access denied to this workspace"
       });
     }
 
-    // เก็บ workspaceId ไว้ใช้ต่อใน route
-    req.workspaceId = workspaceId;
     next();
   } catch (err) {
-    res.status(500).json({ 
-      error: "Failed to check workspace access", 
-      message: err.message 
+    console.error("Error in workspace access middleware:", err);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: err.message
     });
   }
 };

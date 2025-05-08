@@ -1,5 +1,18 @@
 export const validateRequestItems = (req, res, next) => {
-  const { amount, items } = req.body;
+  let { amount, items } = req.body;
+
+  // ถ้า items เป็น string (จาก form-data) ให้ parse ก่อน
+  if (typeof items === "string") {
+    try {
+      items = JSON.parse(items);
+      req.body.items = items; // อัปเดตกลับไปที่ req.body
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        message: "Items must be a valid JSON array"
+      });
+    }
+  }
 
   // ตรวจสอบเฉพาะเมื่อมีการส่งค่ามา
   if (amount !== undefined && amount <= 0) {
@@ -33,16 +46,14 @@ export const validateRequestItems = (req, res, next) => {
 
 // เพิ่ม middleware ใหม่
 export const validateRequesterProof = (req, res, next) => {
-  const { requesterProof } = req.body;
-  
-  if (!requesterProof) {
-    return res.status(400).json({
-      success: false,
-      message: "Requester proof is required"
-    });
+  // ถ้ามีไฟล์ หรือ มี requesterProof ใน body ให้ผ่าน
+  if (req.file || req.body.requesterProof) {
+    return next();
   }
-  
-  next();
+  return res.status(400).json({
+    success: false,
+    message: "Requester proof is required"
+  });
 };
 
 

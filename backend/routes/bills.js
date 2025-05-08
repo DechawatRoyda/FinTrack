@@ -20,7 +20,35 @@ import { checkBillCreator, checkBillStatus } from "../middleware/billAuth.js";
 import {
   validateBillCreation,
   validatePayment,
+  validateConfirmPayment,
 } from "../middleware/billValidation.js";
+
+async function deleteFileFromAzure(fileUrl, metadata = {}) {
+  if (!fileUrl?.includes(AZURE_BLOB_DOMAIN)) return null;
+
+  try {
+    const url = new URL(fileUrl);
+    const blobPath = url.pathname.split('/').slice(2).join('/');
+    await deleteFromAzureBlob(fileUrl);
+    return {
+      success: true,
+      path: blobPath,
+      ...metadata
+    };
+  } catch (error) {
+    console.error("Error deleting file:", {
+      error: error.message,
+      url: fileUrl,
+      ...metadata
+    });
+    return {
+      success: false,
+      url: fileUrl,
+      error: error.message,
+      ...metadata
+    };
+  }
+}
 
 const router = express.Router();
 const storage = multer.memoryStorage();
@@ -43,15 +71,97 @@ router.post(
     authenticateToken,
     validateUserId,
     checkWorkspaceAccessMiddleware,
-    validateBillCreation,
+    // ถ้า validateBillCreation เช็ค items จาก req.body.items เท่านั้น ให้ย้ายไปเช็คเองใน handler
     upload.single("eSlip"),
   ],
   async (req, res) => {
-    const workspace = req.workspaceId; // จาก middleware
-    const { items, note, eSlip, paymentType, roundDetails } = req.body;
-
     try {
-      // Upload to Azure Blob if file exists
+      const workspace = req.workspaceId;
+      let items = null;
+      let note, paymentType, roundDetails;
+
+      // รองรับทั้ง form-data และ JSON
+      const isMultipart =
+        req.headers["content-type"] &&
+        req.headers["content-type"].includes("multipart/form-data");
+
+      if (isMultipart) {
+        // กรณี items เป็น array object (เช่น front ส่ง JSON.stringify(items) หรือ Postman ส่งเป็น array object)
+        if (Array.isArray(req.body.items)) {
+          items = req.body.items.map((item) => ({
+            description: item.description,
+            amount: parseFloat(item.amount),
+            sharedWith: Array.isArray(item.sharedWith)
+              ? item.sharedWith.map((share) => ({
+                  user: share.user,
+                  shareAmount: parseFloat(share.shareAmount),
+                }))
+              : [],
+          }));
+          note = req.body.note;
+          paymentType = req.body.paymentType;
+          if (req.body.roundDetails) {
+            try {
+              roundDetails = JSON.parse(req.body.roundDetails);
+            } catch {
+              roundDetails = req.body.roundDetails;
+            }
+          }
+        } else {
+          // กรณี items[0][description] แบบดั้งเดิม
+          let item = {
+            description: req.body["items[0][description]"],
+            amount: parseFloat(req.body["items[0][amount]"]),
+            sharedWith: [],
+          };
+          let i = 0;
+          while (req.body[`items[0][sharedWith][${i}][user]`]) {
+            item.sharedWith.push({
+              user: req.body[`items[0][sharedWith][${i}][user]`],
+              shareAmount: parseFloat(
+                req.body[`items[0][sharedWith][${i}][shareAmount]`]
+              ),
+            });
+            i++;
+          }
+          items = [item];
+          note = req.body.note;
+          paymentType = req.body.paymentType;
+          if (req.body.roundDetails) {
+            try {
+              roundDetails = JSON.parse(req.body.roundDetails);
+            } catch {
+              roundDetails = req.body.roundDetails;
+            }
+          }
+        }
+      } else {
+        // รับแบบ JSON ปกติ
+        items = req.body.items;
+        note = req.body.note;
+        paymentType = req.body.paymentType;
+        roundDetails = req.body.roundDetails;
+      }
+
+      // ตรวจสอบ items (validation)
+      if (
+        !items ||
+        !Array.isArray(items) ||
+        !items.length ||
+        !items[0].description ||
+        !items[0].amount ||
+        !items[0].sharedWith ||
+        !Array.isArray(items[0].sharedWith) ||
+        !items[0].sharedWith.length
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Items array is required",
+          debug: { items, body: req.body },
+        });
+      }
+
+      // Upload eSlip ถ้ามี
       let slipUrl = null;
       if (req.file) {
         const blobPath = generateBillBlobPath("bill-create", {
@@ -67,7 +177,7 @@ router.post(
         });
       }
 
-      // 1. ดึงข้อมูล creator จาก token
+      // Get creator info
       const user = await User.findById(req.userId);
       if (!user) {
         return res.status(404).json({
@@ -76,11 +186,11 @@ router.post(
         });
       }
 
-      // 2. ดึงข้อมูล users ที่แชร์บิล
+      // Get shared users info
       const sharedUserIds = items[0].sharedWith.map((share) => share.user);
       const sharedUsers = await User.find({ _id: { $in: sharedUserIds } });
 
-      // 3. สร้างบิล
+      // Create bill
       const bill = new Bill({
         workspace,
         creator: [
@@ -94,8 +204,8 @@ router.post(
         roundDetails:
           paymentType === "round"
             ? {
-                dueDate: roundDetails.dueDate,
-                totalPeriod: roundDetails.totalPeriod,
+                dueDate: roundDetails?.dueDate,
+                totalPeriod: roundDetails?.totalPeriod,
                 currentRound: 1,
               }
             : undefined,
@@ -107,9 +217,8 @@ router.post(
                 (user) => user._id.toString() === share.user.toString()
               );
 
-              // สร้าง roundPayments ถ้าเป็นการผ่อนจ่าย
               const roundPayments =
-                paymentType === "round"
+                paymentType === "round" && roundDetails?.totalPeriod
                   ? Array.from(
                       { length: roundDetails.totalPeriod },
                       (_, i) => ({
@@ -122,7 +231,7 @@ router.post(
 
               return {
                 user: share.user,
-                name: sharedUser.name,
+                name: sharedUser?.name,
                 status: "pending",
                 shareAmount: share.shareAmount,
                 roundPayments,
@@ -131,7 +240,7 @@ router.post(
           },
         ],
         note,
-        eSlip: slipUrl || eSlip,
+        eSlip: slipUrl,
         status: "pending",
       });
 
@@ -143,11 +252,12 @@ router.post(
         data: bill,
       });
     } catch (err) {
-      console.error(`Error in ${req.method} ${req.originalUrl}:`, {
+      console.error(`Error in create bill:`, {
         error: err.message,
         stack: err.stack,
         userId: req.userId,
-        workspace: workspace,
+        workspace: req.workspaceId,
+        body: req.body,
       });
       res.status(500).json({
         success: false,
@@ -166,13 +276,96 @@ router.get(
     try {
       const bills = await Bill.find({ workspace: req.workspaceId })
         .populate("workspace")
-        .populate("creator") // เลือกเฉพาะฟิลด์ที่ต้องการ
-        .populate("items.sharedWith"); // เลือกเฉพาะฟิลด์ที่ต้องการ
+        .populate("creator")
+        .populate("items.sharedWith.user", "name email");
+
+      const now = new Date();
+      const billsWithRound = bills.map(bill => {
+        let roundDueDates = [];
+        let roundStatus = [];
+        if (
+          bill.paymentType === "round" &&
+          bill.roundDetails?.dueDate &&
+          bill.roundDetails?.totalPeriod
+        ) {
+          const dueDate = new Date(bill.roundDetails.dueDate);
+          for (let i = 0; i < bill.roundDetails.totalPeriod; i++) {
+            const roundDue = new Date(dueDate);
+            roundDue.setMonth(roundDue.getMonth() + i);
+            roundDueDates.push(roundDue.toISOString().slice(0, 10));
+            roundStatus.push({
+              round: i + 1,
+              dueDate: roundDue,
+              isDue: now >= roundDue
+            });
+          }
+        }
+
+        // ดึง currentRound
+        const currentRound = bill.roundDetails?.currentRound || 1;
+
+        // สร้าง response object ที่มีแต่ข้อมูลที่จำเป็น
+        return {
+          _id: bill._id,
+          workspace: bill.workspace,
+          creator: bill.creator,
+          paymentType: bill.paymentType,
+          roundDetails: bill.roundDetails,
+          items: bill.items.map(item => ({
+            _id: item._id,
+            description: item.description,
+            amount: item.amount,
+            sharedWith: item.sharedWith.map(share => ({
+              user: share.user && typeof share.user === "object"
+                ? {
+                    _id: share.user._id,
+                    name: share.user.name,
+                    email: share.user.email
+                  }
+                : share.user,
+              name: share.name,
+              status: share.status,
+              shareAmount: share.shareAmount,
+              // filter เฉพาะรอบที่ <= currentRound เท่านั้น
+              roundPayments: (share.roundPayments || []).filter(
+                p => p.round <= currentRound
+              ),
+              eSlip: share.eSlip ? {
+                url: share.eSlip,
+                path: new URL(share.eSlip).pathname
+              } : null
+            }))
+          })),
+          note: bill.note,
+          status: bill.status,
+          eSlip: bill.eSlip ? {
+            url: bill.eSlip,
+            path: new URL(bill.eSlip).pathname
+          } : null,
+          createdAt: bill.createdAt,
+          updatedAt: bill.updatedAt,
+          statusInfo: {
+            status: bill.status,
+            isModifiable: !['canceled', 'paid'].includes(bill.status),
+            canceledAt: bill.canceledAt,
+            canceledBy: bill.canceledBy,
+            paidAt: bill.status === 'paid' ? bill.updatedAt : null
+          },
+          roundInfo: bill.paymentType === 'round' ? {
+            currentRound: bill.roundDetails?.currentRound,
+            totalPeriod: bill.roundDetails?.totalPeriod,
+            dueDate: bill.roundDetails?.dueDate,
+            isLastRound: bill.roundDetails?.currentRound === bill.roundDetails?.totalPeriod
+          } : null,
+          roundDueDates,
+          roundStatus
+        };
+      });
 
       res.status(200).json({
         success: true,
         message: "Bills retrieved successfully",
-        data: bills,
+        data: billsWithRound,
       });
     } catch (err) {
       console.error(`Error in ${req.method} ${req.originalUrl}:`, {
@@ -197,15 +390,18 @@ router.get(
     authenticateToken,
     validateUserId,
     checkWorkspaceAccessMiddleware,
-    checkBillStatus,
   ],
   async (req, res) => {
-    const { id } = req.params; // ✅ เพิ่มบรรทัดนี้
+    const { id } = req.params;
     try {
-      const bill = await Bill.findById(id)
-        .populate("workspace")
-        .populate("creator.userId", "name numberAccount")
-        .populate("items.sharedWith.user", "name email");
+      const bill = await Bill.findOne({ 
+        _id: id,
+        workspace: req.workspaceId 
+      })
+        .populate('workspace', 'name type owner budget')
+        .populate('creator.userId', 'name numberAccount')
+        .populate('items.sharedWith.user', 'name email')
+        .lean();
 
       if (!bill) {
         return res.status(404).json({
@@ -214,99 +410,107 @@ router.get(
         });
       }
 
-      // แปลงข้อมูลให้มี URL ของรูปภาพและข้อมูลเพิ่มเติม
-      const detailedBill = {
-        ...bill.toObject(),
-        // รูปสลิปหลัก
-        eSlip: bill.eSlip
-          ? {
-              url: bill.eSlip,
-              path: bill.eSlip ? new URL(bill.eSlip).pathname : null,
-            }
-          : null,
-        // ข้อมูลการจ่ายแบบรอบ
-        roundInfo:
-          bill.paymentType === "round"
-            ? {
-                currentRound: bill.roundDetails.currentRound,
-                totalPeriod: bill.roundDetails.totalPeriod,
-                dueDate: bill.roundDetails.dueDate,
-                isLastRound:
-                  bill.roundDetails.currentRound ===
-                  bill.roundDetails.totalPeriod,
-              }
-            : null,
-        // รายการในบิล
-        items: bill.items.map((item) => ({
-          ...item,
-          sharedWith: item.sharedWith.map((share) => {
-            // คำนวณยอดค้างชำระสะสม (สำหรับการจ่ายแบบรอบ)
-            const accumulatedAmount =
-              bill.paymentType === "round"
-                ? bill.calculateAccumulatedAmount(share.user._id)
-                : 0;
+      // เพิ่มฟิลด์ roundDueDates และ roundStatus
+      let roundDueDates = [];
+      let roundStatus = [];
+      if (
+        bill.paymentType === "round" &&
+        bill.roundDetails?.dueDate &&
+        bill.roundDetails?.totalPeriod
+      ) {
+        const dueDate = new Date(bill.roundDetails.dueDate);
+        const now = new Date();
+        for (let i = 0; i < bill.roundDetails.totalPeriod; i++) {
+          const roundDue = new Date(dueDate);
+          roundDue.setMonth(roundDue.getMonth() + i);
+          roundDueDates.push(roundDue.toISOString().slice(0, 10));
+          roundStatus.push({
+            round: i + 1,
+            dueDate: roundDue,
+            isDue: now >= roundDue
+          });
+        }
+      }
 
-            // ข้อมูลการจ่ายรายงวด
-            const roundPaymentInfo =
-              bill.paymentType === "round"
-                ? {
-                    currentRoundPayment: share.roundPayments.find(
-                      (p) => p.round === bill.roundDetails.currentRound
-                    ),
-                    paidRounds: share.roundPayments.filter(
-                      (p) => p.status === "paid"
-                    ).length,
-                    remainingRounds: share.roundPayments.filter(
-                      (p) => p.status === "pending"
-                    ).length,
-                    nextUnpaidRound: share.roundPayments.find(
-                      (p) => p.status === "pending"
-                    )?.round,
-                    roundPayments: share.roundPayments.map((payment) => ({
-                      ...payment,
-                      eSlip: payment.eSlip
-                        ? {
-                            url: payment.eSlip,
-                            path: payment.eSlip
-                              ? new URL(payment.eSlip).pathname
-                              : null,
-                          }
-                        : null,
-                    })),
-                  }
-                : null;
+      // ดึง currentRound
+      const currentRound = bill.roundDetails?.currentRound || 1;
 
-            return {
-              ...share,
-              eSlip: share.eSlip
-                ? {
-                    url: share.eSlip,
-                    path: share.eSlip ? new URL(share.eSlip).pathname : null,
-                  }
-                : null,
-              accumulatedAmount,
-              roundPaymentInfo,
-            };
-          }),
+      // สร้าง response object ที่มีแต่ข้อมูลที่จำเป็น
+      const billDetails = {
+        _id: bill._id,
+        workspace: bill.workspace,
+        creator: bill.creator.map(c => ({
+          userId: c.userId._id,
+          name: c.userId.name,
+          numberAccount: c.userId.numberAccount
         })),
+        paymentType: bill.paymentType,
+        roundDetails: bill.roundDetails,
+        items: bill.items.map(item => ({
+          _id: item._id,
+          description: item.description,
+          amount: item.amount,
+          sharedWith: item.sharedWith.map(share => ({
+            user: {
+              _id: share.user._id,
+              name: share.user.name,
+              email: share.user.email
+            },
+            name: share.name,
+            status: share.status,
+            shareAmount: share.shareAmount,
+            // filter เฉพาะรอบที่ <= currentRound หรือยังไม่จ่าย
+            roundPayments: (share.roundPayments || []).filter(
+              p => p.round <= currentRound || (p.status !== "paid" && p.round < currentRound)
+            ),
+            eSlip: share.eSlip ? {
+              url: share.eSlip,
+              path: new URL(share.eSlip).pathname
+            } : null
+          }))
+        })),
+        note: bill.note,
+        status: bill.status,
+        eSlip: bill.eSlip ? {
+          url: bill.eSlip,
+          path: new URL(bill.eSlip).pathname
+        } : null,
+        createdAt: bill.createdAt,
+        updatedAt: bill.updatedAt,
+        statusInfo: {
+          status: bill.status,
+          isModifiable: !['canceled', 'paid'].includes(bill.status),
+          canceledAt: bill.canceledAt,
+          canceledBy: bill.canceledBy,
+          paidAt: bill.status === 'paid' ? bill.updatedAt : null
+        },
+        roundInfo: bill.paymentType === 'round' ? {
+          currentRound: bill.roundDetails?.currentRound,
+          totalPeriod: bill.roundDetails?.totalPeriod,
+          dueDate: bill.roundDetails?.dueDate,
+          isLastRound: bill.roundDetails?.currentRound === bill.roundDetails?.totalPeriod
+        } : null,
+        roundDueDates,
+        roundStatus
       };
 
       res.status(200).json({
         success: true,
         message: "Bill retrieved successfully",
-        data: detailedBill,
+        data: billDetails
       });
+
     } catch (err) {
       console.error(`Error in ${req.method} ${req.originalUrl}:`, {
         error: err.message,
         stack: err.stack,
         userId: req.userId,
-        billId: id,
+        billId: id
       });
       res.status(500).json({
         success: false,
         message: "Failed to fetch bill details",
-        error: err.message,
+        error: err.message
       });
     }
   }
@@ -325,12 +529,64 @@ router.put(
     checkWorkspaceAccessMiddleware,
     checkBillStatus,
     checkBillCreator,
-    upload.single("eSlip"), // เพิ่ม multer middleware
+    upload.single("eSlip"),
   ],
   async (req, res) => {
-    const { id } = req.params; // ✅ เพิ่มบรรทัดนี้
+    const { id } = req.params;
     const bill = req.bill;
-    const { items, note, eSlip, status } = req.body;
+
+    // รองรับทั้ง form-data และ JSON
+    const isMultipart =
+      req.headers["content-type"] &&
+      req.headers["content-type"].includes("multipart/form-data");
+
+    let items, note, status;
+
+    if (isMultipart) {
+      // กรณี items เป็น array object (เช่น front ส่ง JSON.stringify(items) หรือ Postman ส่งเป็น array object)
+      if (Array.isArray(req.body.items)) {
+        items = req.body.items.map((item) => ({
+          _id: item._id,
+          description: item.description,
+          amount: parseFloat(item.amount),
+          sharedWith: Array.isArray(item.sharedWith)
+            ? item.sharedWith.map((share) => ({
+                user: share.user,
+                shareAmount: parseFloat(share.shareAmount),
+                status: share.status,
+                eslip: share.eslip,
+              }))
+            : [],
+        }));
+      } else {
+        // กรณี items[0][description] แบบดั้งเดิม
+        let item = {
+          _id: req.body["items[0][_id]"],
+          description: req.body["items[0][description]"],
+          amount: parseFloat(req.body["items[0][amount]"]),
+          sharedWith: [],
+        };
+        let i = 0;
+        while (req.body[`items[0][sharedWith][${i}][user]`]) {
+          item.sharedWith.push({
+            user: req.body[`items[0][sharedWith][${i}][user]`],
+            shareAmount: parseFloat(
+              req.body[`items[0][sharedWith][${i}][shareAmount]`]
+            ),
+            status: req.body[`items[0][sharedWith][${i}][status]`],
+            eslip: req.body[`items[0][sharedWith][${i}][eslip]`],
+          });
+          i++;
+        }
+        items = [item];
+      }
+      note = req.body.note;
+      status = req.body.status;
+    } else {
+      items = req.body.items;
+      note = req.body.note;
+      status = req.body.status;
+    }
 
     // Upload new slip if provided
     if (req.file) {
@@ -348,10 +604,8 @@ router.put(
     }
 
     try {
-      const bill = req.bill;
       // อัพเดตข้อมูลทั่วไปของบิล (ถ้ามี)
       if (note !== undefined) bill.note = note;
-      if (eSlip !== undefined) bill.eSlip = eSlip;
       if (status !== undefined) bill.status = status;
 
       // อัพเดตรายการสินค้า (ถ้ามี)
@@ -368,7 +622,6 @@ router.put(
               if (updatedItem.description !== undefined) {
                 bill.items[itemIndex].description = updatedItem.description;
               }
-
               if (updatedItem.amount !== undefined) {
                 bill.items[itemIndex].amount = updatedItem.amount;
               }
@@ -391,13 +644,11 @@ router.put(
                         bill.items[itemIndex].sharedWith[shareIndex].status =
                           updatedShare.status;
                       }
-
                       if (updatedShare.shareAmount !== undefined) {
                         bill.items[itemIndex].sharedWith[
                           shareIndex
                         ].shareAmount = updatedShare.shareAmount;
                       }
-
                       if (updatedShare.eslip !== undefined) {
                         bill.items[itemIndex].sharedWith[shareIndex].eslip =
                           updatedShare.eslip;
@@ -455,53 +706,89 @@ router.delete(
     authenticateToken,
     validateUserId,
     checkWorkspaceAccessMiddleware,
-    checkBillStatus,
     checkBillCreator,
   ],
   async (req, res) => {
-    const { id } = req.params; // ✅ เพิ่มบรรทัดนี้
+    const { id } = req.params;
     try {
-      const bill = req.bill;
+      const bill = await Bill.findOne({ 
+        _id: id,
+        workspace: req.workspaceId,
+        'creator.userId': req.userId
+      });
 
-      // Delete main bill slip if exists
-      if (bill.eSlip && bill.eSlip.includes(AZURE_BLOB_DOMAIN)) {
-        try {
-          await deleteFromAzureBlob(bill.eSlip);
-        } catch (error) {
-          console.error("Error deleting bill slip:", error);
+      if (!bill) {
+        return res.status(404).json({
+          success: false,
+          message: "Bill not found or you don't have permission to delete it"
+        });
+      }
+
+      // Track deleted files
+      const deletedFiles = [];
+      const failedFiles = [];
+
+      // Delete main bill slip using deleteFileFromAzure
+      const mainFileResult = await deleteFileFromAzure(bill.eSlip, {
+        type: 'main',
+        billId: bill._id
+      });
+      if (mainFileResult) {
+        if (mainFileResult.success) {
+          deletedFiles.push(mainFileResult);
+        } else {
+          failedFiles.push(mainFileResult);
         }
       }
 
-      // Delete all payment slips
+      // Delete all payment slips using deleteFileFromAzure
       for (const item of bill.items) {
         for (const share of item.sharedWith) {
-          if (share.eSlip && share.eSlip.includes(AZURE_BLOB_DOMAIN)) {
-            try {
-              await deleteFromAzureBlob(share.eSlip);
-            } catch (error) {
-              console.error("Error deleting payment slip:", error);
+          const paymentFileResult = await deleteFileFromAzure(share.eSlip, {
+            type: 'payment',
+            userId: share.user,
+            itemId: item._id
+          });
+          if (paymentFileResult) {
+            if (paymentFileResult.success) {
+              deletedFiles.push(paymentFileResult);
+            } else {
+              failedFiles.push(paymentFileResult);
             }
           }
         }
       }
 
+      // Delete bill document
       await bill.deleteOne();
 
       res.json({
         success: true,
         message: "Bill and associated files deleted successfully",
+        data: {
+          billId: id,
+          workspace: bill.workspace,
+          deletedAt: new Date(),
+          filesDeleted: {
+            success: deletedFiles,
+            failed: failedFiles,
+            totalDeleted: deletedFiles.length,
+            totalFailed: failedFiles.length
+          }
+        }
       });
+
     } catch (err) {
-      console.error(`Error in ${req.method} ${req.originalUrl}:`, {
+      console.error(`Error in delete bill:`, {
         error: err.message,
         stack: err.stack,
         userId: req.userId,
-        billId: id, // ✅
+        billId: id
       });
       res.status(500).json({
         success: false,
         message: "Failed to delete bill",
-        error: err.message,
+        error: err.message
       });
     }
   }
@@ -519,15 +806,16 @@ router.post(
     validateUserId,
     checkWorkspaceAccessMiddleware,
     checkBillStatus,
+    upload.single("eSlip"), // ย้ายขึ้นมาก่อน validatePayment
     validatePayment,
-    upload.single("eSlip"), // เพิ่ม multer middleware
   ],
   async (req, res) => {
-    const bill = req.bill; // เพิ่มบรรทัดนี้ - ใช้ bill จาก middleware
-    const { eslipUrl, itemId } = req.body;
-    const { id } = req.params; // ✅ เพิ่มบรรทัดนี้
+    const { id } = req.params;
+    const itemId = req.body.itemId;
 
     try {
+      const bill = req.bill;
+      // หา item ในบิล
       const item = bill.items.find((item) => item._id.toString() === itemId);
       if (!item) {
         return res.status(404).json({
@@ -536,6 +824,7 @@ router.post(
         });
       }
 
+      // หาข้อมูลการแชร์ของผู้ใช้
       const userShare = item.sharedWith.find(
         (share) => share.user.toString() === req.userId.toString()
       );
@@ -546,24 +835,25 @@ router.post(
         });
       }
 
-      // Upload payment slip to Azure Blob
-      if (req.file) {
-        const blobPath = generateBillBlobPath("payment-submit", {
-          userId: req.userId,
-          billId: bill._id,
-          itemId: itemId,
-          originalname: req.file.originalname,
-        });
-        const slipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
-          userId: req.userId.toString(),
-          billId: bill._id.toString(),
-          itemId: itemId,
-          type: "payment-slip",
-        });
-        userShare.eSlip = slipUrl;
-      }
+      // อัพโหลดสลิปไปที่ Azure Blob
+      const blobPath = generateBillBlobPath("payment-submit", {
+        userId: req.userId,
+        billId: bill._id,
+        itemId: itemId,
+        originalname: req.file.originalname,
+      });
 
+      const slipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
+        userId: req.userId.toString(),
+        billId: bill._id.toString(),
+        itemId: itemId,
+        type: "payment-slip",
+      });
+
+      // อัพเดตข้อมูลการจ่ายเงิน
+      userShare.eSlip = slipUrl;
       userShare.status = "awaiting_confirmation";
+
       await bill.save();
 
       res.json({
@@ -572,12 +862,13 @@ router.post(
         data: bill,
       });
     } catch (err) {
-      console.error(`Error in ${req.method} ${req.originalUrl}:`, {
+      console.error(`Error in payment submission:`, {
         error: err.message,
         stack: err.stack,
         userId: req.userId,
         billId: id,
-        itemId: req.body.itemId,
+        itemId: itemId,
+        file: req.file,
       });
       res.status(500).json({
         success: false,
@@ -599,16 +890,39 @@ router.patch(
     authenticateToken,
     validateUserId,
     checkWorkspaceAccessMiddleware,
-    checkBillStatus,
+    checkBillStatus, // middleware นี้จะเก็บ bill ไว้ใน req.bill
     checkBillCreator,
+    upload.none(),
+    validateConfirmPayment,
   ],
   async (req, res) => {
-    const { id } = req.params; // ✅ เพิ่มบรรทัดนี้
+    const { id } = req.params;
     try {
+      // รับค่า bill จาก middleware
       const bill = req.bill;
-      const { itemId, userIdToConfirm, round } = req.body;
 
-      // หารายการที่ต้องการอัพเดต
+      // รับค่าจาก form-data
+      const { itemId, userIdToConfirm } = req.body;
+
+      // Log สำหรับ debug
+      console.log("Processing confirmation:", {
+        billId: id,
+        itemId,
+        userIdToConfirm,
+        body: req.body,
+        bill: bill._id,
+      });
+
+      // ตรวจสอบข้อมูลที่จำเป็น
+      if (!itemId || !userIdToConfirm) {
+        return res.status(400).json({
+          success: false,
+          message: "itemId and userIdToConfirm are required",
+          debug: { body: req.body },
+        });
+      }
+
+      // Find item
       const item = bill.items.find((item) => item._id.toString() === itemId);
       if (!item) {
         return res.status(404).json({
@@ -617,7 +931,7 @@ router.patch(
         });
       }
 
-      // หาผู้ใช้ในรายการที่ต้องการอัพเดต
+      // Find user share
       const userShare = item.sharedWith.find(
         (share) => share.user.toString() === userIdToConfirm
       );
@@ -628,184 +942,62 @@ router.patch(
         });
       }
 
-      // ตรวจสอบว่ามีการแนบสลิปหรือไม่
-      if (!userShare.eSlip) {
+      // Check status
+      if (userShare.status !== "awaiting_confirmation") {
         return res.status(400).json({
           success: false,
-          message: "Payment evidence not found",
-        });
-      }
-
-      // จัดการตามประเภทการจ่ายเงิน
-      if (bill.paymentType === "round") {
-        // ตรวจสอบว่ามี Transaction สำหรับรอบนี้อยู่แล้วหรือไม่
-        const existingTransaction = await Transaction.findOne({
-          workspace: bill.workspace,
-          user: bill.creator[0].userId,
-          category: "Bill Payment",
-          reference: {
-            type: "Bill",
-            id: bill._id,
-            round: round,
+          message: "Payment is not awaiting confirmation",
+          debug: {
+            currentStatus: userShare.status,
+            expectedStatus: "awaiting_confirmation",
           },
         });
-
-        if (existingTransaction) {
-          return res.status(400).json({
-            success: false,
-            message: `Transaction for round ${round} already exists`,
-          });
-        }
-
-        // หา roundPayment ที่ต้องการอัพเดต
-        const roundPayment = userShare.roundPayments.find(
-          (p) => p.round === round
-        );
-        if (!roundPayment) {
-          return res.status(404).json({
-            success: false,
-            message: `Round ${round} not found`,
-          });
-        }
-
-        if (roundPayment.status === "paid") {
-          return res.status(400).json({
-            success: false,
-            message: `Round ${round} is already paid`,
-          });
-        }
-
-        // อัพเดตการจ่ายเงินสำหรับรอบนี้
-        roundPayment.status = "paid";
-        roundPayment.paidDate = new Date();
-        roundPayment.eSlip = userShare.eSlip;
-
-        // เช็คว่าจ่ายครบทุกรอบหรือยัง
-        const allRoundsPaid = userShare.roundPayments.every(
-          (p) => p.status === "paid"
-        );
-        if (allRoundsPaid) {
-          userShare.status = "paid";
-        }
-      } else {
-        // กรณีจ่ายแบบปกติ
-        if (userShare.status !== "awaiting_confirmation") {
-          return res.status(400).json({
-            success: false,
-            message: "Payment is not awaiting confirmation",
-          });
-        }
-
-        const existingTransaction = await Transaction.findOne({
-          workspace: bill.workspace,
-          user: bill.creator[0].userId,
-          category: "Bill Payment",
-          reference: {
-            type: "Bill",
-            id: bill._id,
-          },
-        });
-
-        if (existingTransaction) {
-          return res.status(400).json({
-            success: false,
-            message: "Transaction for this bill already exists",
-          });
-        }
-
-        userShare.status = "paid";
       }
 
-      // อัพโหลดสลิปไปยัง Azure Blob ถ้าต้องการ
-      if (userShare.eSlip && !userShare.eSlip.startsWith(AZURE_BLOB_DOMAIN)) {
-        try {
-          const blobPath = generateBillBlobPath("payment-confirm", {
-            userId: userIdToConfirm,
-            billId: bill._id,
-            itemId: itemId,
-            round: round,
-          });
+      // Update status
+      userShare.status = "paid";
 
-          const response = await fetch(userShare.eSlip);
-          const buffer = await response.buffer();
-
-          const slipUrl = await uploadToAzureBlob(buffer, blobPath, {
-            billId: bill._id.toString(),
-            itemId: itemId,
-            userId: userIdToConfirm,
-            type: "payment-confirm",
-            round: round,
-          });
-
-          userShare.eSlip = slipUrl;
-        } catch (error) {
-          console.error("Error uploading to Azure:", error);
-        }
-      }
-
-      // สร้าง Transaction
+      // Create transaction
       const transaction = new Transaction({
         user: bill.creator[0].userId,
         workspace: bill.workspace,
         type: "Income",
-        amount:
-          bill.paymentType === "round"
-            ? userShare.shareAmount
-            : userShare.shareAmount,
+        amount: userShare.shareAmount,
         category: "Bill Payment",
-        description:
-          bill.paymentType === "round"
-            ? `Round ${round} payment received from ${userShare.name}`
-            : `Bill payment received from ${userShare.name}`,
+        description: `Bill payment received from ${userShare.name}`,
         slip_image: userShare.eSlip,
+        transaction_date: new Date(),
         reference: {
           type: "Bill",
           id: bill._id,
           itemId: itemId,
           userId: userIdToConfirm,
-          round: round,
         },
       });
 
-      // เช็คว่าทุกคนจ่ายครบหรือยัง
+      // Check if all paid
       const allPaid = bill.items.every((item) =>
-        item.sharedWith.every((share) =>
-          bill.paymentType === "round"
-            ? share.roundPayments.every((p) => p.status === "paid")
-            : share.status === "paid"
-        )
+        item.sharedWith.every((share) => share.status === "paid")
       );
 
       if (allPaid) {
         bill.status = "paid";
       }
 
-      // บันทึกการเปลี่ยนแปลง
+      // Save changes
       await Promise.all([bill.save(), transaction.save()]);
 
       res.json({
         success: true,
         message: "Payment confirmed successfully",
-        data: {
-          bill,
-          transaction,
-          roundStatus:
-            bill.paymentType === "round"
-              ? {
-                  currentRound: round,
-                  isPaidAll: allPaid,
-                  accumulatedAmount:
-                    bill.calculateAccumulatedAmount(userIdToConfirm),
-                }
-              : undefined,
-        },
+        data: bill,
       });
     } catch (err) {
-      console.error(`Error in confirm payment:`, {
+      console.error("Error in confirm payment:", {
         error: err.message,
         stack: err.stack,
-        userId: req.userId,
-        billId: id, // ✅
+        billId: id,
+        body: req.body,
       });
       res.status(500).json({
         success: false,
@@ -820,7 +1012,7 @@ router.patch(
  * @route PATCH /api/bills/:billId/cancel
  * @desc Cancel a bill
  */
-// 6️⃣ ยกเลิกบิล (เปลี่ยนสถานะเป็น canceled)
+// 2. แก้ไข router cancel
 router.patch(
   "/:id/cancel",
   [
@@ -829,66 +1021,110 @@ router.patch(
     checkWorkspaceAccessMiddleware,
     checkBillStatus,
     checkBillCreator,
+    upload.none(),
   ],
   async (req, res) => {
-    const { id } = req.params; // ✅ เพิ่มบรรทัดนี้
+    const { id } = req.params;
     try {
       const bill = req.bill;
 
-      // 1. ลบรูปสลิปหลักของบิล
-      if (bill.eSlip?.includes(AZURE_BLOB_DOMAIN)) {
-        try {
-          await deleteFromAzureBlob(bill.eSlip);
-          bill.eSlip = null;
-          console.log(`Deleted main bill slip for bill ${bill._id}`);
-        } catch (error) {
-          console.error("Error deleting main bill slip:", error);
+      console.log("Processing bill cancellation:", {
+        billId: id,
+        currentStatus: bill.status,
+      });
+
+      if (bill.status === "canceled") {
+        return res.status(400).json({
+          success: false,
+          message: "Bill is already canceled"
+        });
+      }
+
+      // เก็บข้อมูลการลบไฟล์
+      const deletedFiles = [];
+      const failedFiles = [];
+
+      // ลบไฟล์หลักของบิล
+      const mainFileResult = await deleteFileFromAzure(bill.eSlip, {
+        type: 'main',
+        billId: bill._id
+      });
+      if (mainFileResult) {
+        if (mainFileResult.success) {
+          deletedFiles.push(mainFileResult);
+        } else {
+          failedFiles.push(mainFileResult);
         }
       }
 
-      // 2. ลบรูปสลิปการจ่ายเงินของทุกคนที่ร่วมจ่าย
+      // ลบไฟล์การชำระเงินทั้งหมด
       for (const item of bill.items) {
         for (const share of item.sharedWith) {
-          if (share.eSlip?.includes(AZURE_BLOB_DOMAIN)) {
-            try {
-              await deleteFromAzureBlob(share.eSlip);
-              share.eSlip = null;
-              console.log(
-                `Deleted payment slip for user ${share.user} in bill ${bill._id}`
-              );
-            } catch (error) {
-              console.error("Error deleting payment slip:", error);
+          const paymentFileResult = await deleteFileFromAzure(share.eSlip, {
+            type: 'payment',
+            userId: share.user,
+            itemId: item._id
+          });
+          if (paymentFileResult) {
+            if (paymentFileResult.success) {
+              deletedFiles.push(paymentFileResult);
+            } else {
+              failedFiles.push(paymentFileResult);
             }
           }
-          // รีเซ็ตสถานะการจ่ายเงิน
-          share.status = "canceled";
         }
       }
 
-      // 3. อัพเดตสถานะและบันทึกการเปลี่ยนแปลง
-      bill.status = "canceled";
-      bill.canceledAt = new Date();
-      bill.canceledBy = req.userId;
-      bill.updatedAt = new Date();
+      // อัพเดตข้อมูลแบบ atomic operation
+      const updatedBill = await Bill.findByIdAndUpdate(
+        id,
+        {
+          $set: {
+            status: "canceled",
+            "items.$[].sharedWith.$[].status": "canceled",
+            canceledAt: new Date(),
+            canceledBy: req.userId,
+            updatedAt: new Date(),
+            eSlip: null, // เพิ่มการ set null หลังจากลบไฟล์
+            "items.$[].sharedWith.$[].eSlip": null
+          },
+        },
+        { new: true, runValidators: true }
+      );
 
-      await bill.save();
+      if (!updatedBill) {
+        return res.status(404).json({
+          success: false,
+          message: "Bill not found"
+        });
+      }
 
       res.json({
         success: true,
-        message: "Bill canceled and all associated files deleted successfully",
-        data: bill,
+        message: "Bill canceled successfully",
+        data: {
+          bill: updatedBill,
+          canceledAt: updatedBill.canceledAt,
+          canceledBy: updatedBill.canceledBy,
+          filesDeleted: {
+            success: deletedFiles,
+            failed: failedFiles,
+            totalDeleted: deletedFiles.length,
+            totalFailed: failedFiles.length
+          }
+        }
       });
+
     } catch (err) {
-      console.error(`Error in ${req.method} ${req.originalUrl}:`, {
+      console.error("Error in cancel bill:", {
         error: err.message,
         stack: err.stack,
-        userId: req.userId,
-        billId: id, // ✅
+        billId: id,
       });
       res.status(500).json({
         success: false,
         message: "Failed to cancel bill",
-        error: err.message,
+        error: err.message
       });
     }
   }
@@ -906,14 +1142,20 @@ router.patch(
     checkWorkspaceAccessMiddleware,
     checkBillStatus,
     checkBillCreator,
+    upload.none(), // <<== เพิ่มบรรทัดนี้
   ],
   async (req, res) => {
-    const { id } = req.params; // ✅ เพิ่มบรรทัดนี้
+    const { id } = req.params;
     try {
       const bill = req.bill;
-      const { dueDate, totalPeriod, currentRound } = req.body;
 
-      // ตรวจสอบว่าเป็นบิลแบบรอบหรือไม่
+      // DEBUG: log body
+      console.log('PATCH /:id/round req.body:', req.body);
+      // แปลงค่าจาก form-data ให้เป็นตัวเลข
+      const dueDate = req.body.dueDate;
+      const totalPeriod = req.body.totalPeriod ? Number(req.body.totalPeriod) : undefined;
+      const currentRound = req.body.currentRound ? Number(req.body.currentRound) : undefined;
+
       if (bill.paymentType !== "round") {
         return res.status(400).json({
           success: false,
@@ -921,18 +1163,19 @@ router.patch(
         });
       }
 
-      // อัพเดตรายละเอียดการจ่ายแบบรอบ
+      // DEBUG: log ก่อนแก้ไข
+      console.log('ก่อน:', bill.roundDetails);
+
       if (dueDate) {
         bill.roundDetails.dueDate = new Date(dueDate);
       }
 
-      // ตรวจสอบการแก้ไขจำนวนงวด
       if (totalPeriod) {
-        // ตรวจสอบว่าลดจำนวนงวดน้อยกว่างวดที่จ่ายไปแล้วหรือไม่
         const maxPaidRound = Math.max(
+          0,
           ...bill.items.flatMap((item) =>
             item.sharedWith.flatMap((share) =>
-              share.roundPayments
+              (share.roundPayments || [])
                 .filter((p) => p.status === "paid")
                 .map((p) => p.round)
             )
@@ -946,18 +1189,13 @@ router.patch(
           });
         }
 
-        // อัพเดตจำนวนงวดและปรับ roundPayments
         bill.roundDetails.totalPeriod = totalPeriod;
 
-        // ปรับ roundPayments ของทุกคนตามจำนวนงวดใหม่
         bill.items.forEach((item) => {
           item.sharedWith.forEach((share) => {
-            // เก็บ roundPayments เดิมที่มีการจ่ายแล้ว
-            const paidPayments = share.roundPayments.filter(
+            const paidPayments = (share.roundPayments || []).filter(
               (p) => p.status === "paid"
             );
-
-            // สร้าง roundPayments ใหม่
             share.roundPayments = Array.from(
               { length: totalPeriod },
               (_, i) => {
@@ -979,7 +1217,6 @@ router.patch(
         });
       }
 
-      // อัพเดตรอบปัจจุบัน
       if (currentRound !== undefined) {
         if (currentRound > bill.roundDetails.totalPeriod) {
           return res.status(400).json({
@@ -992,17 +1229,23 @@ router.patch(
 
       await bill.save();
 
+      // DEBUG: log หลัง save
+      console.log('หลัง:', bill.roundDetails);
+
+      // โหลดข้อมูลใหม่หลัง save
+      const updatedBill = await Bill.findById(id);
+
       res.json({
         success: true,
         message: "Round payment details updated successfully",
         data: {
-          bill,
+          bill: updatedBill,
           roundInfo: {
-            currentRound: bill.roundDetails.currentRound,
-            totalPeriod: bill.roundDetails.totalPeriod,
-            dueDate: bill.roundDetails.dueDate,
+            currentRound: updatedBill.roundDetails.currentRound,
+            totalPeriod: updatedBill.roundDetails.totalPeriod,
+            dueDate: updatedBill.roundDetails.dueDate,
             isLastRound:
-              bill.roundDetails.currentRound === bill.roundDetails.totalPeriod,
+              updatedBill.roundDetails.currentRound === updatedBill.roundDetails.totalPeriod,
           },
         },
       });
@@ -1011,7 +1254,7 @@ router.patch(
         error: err.message,
         stack: err.stack,
         userId: req.userId,
-        billId: id, // ✅
+        billId: id,
       });
       res.status(500).json({
         success: false,

@@ -58,7 +58,7 @@ const billSchema = new mongoose.Schema({
       name: String,
       status: {
         type: String,
-        enum: ["pending", "awaiting_confirmation", "paid"],
+        enum: ["pending", "awaiting_confirmation", "paid", "canceled"],
         default: "pending"
       },
       eSlip: String,
@@ -69,7 +69,7 @@ const billSchema = new mongoose.Schema({
         amount: Number,
         status: {
           type: String,
-          enum: ["pending", "paid"],
+          enum: ["pending", "paid", "canceled"],
           default: "pending"
         },
         paidDate: Date,

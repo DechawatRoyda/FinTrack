@@ -83,23 +83,29 @@ export const getUserBlobs = async (userId) => {
 };
 
 export const deleteFromAzureBlob = async (blobUrl) => {
-    try {
-      const blobServiceClient = BlobServiceClient.fromConnectionString(
-        process.env.AZURE_STORAGE_CONNECTION_STRING
-      );
-      
-      const containerClient = blobServiceClient.getContainerClient(
-        process.env.AZURE_STORAGE_CONTAINER_NAME
-      );
-  
-      // แยก blobName จาก URL
-      const blobName = blobUrl.split('/').pop();
-      const blobClient = containerClient.getBlobClient(blobName);
-      
-      await blobClient.delete();
-      return true;
-    } catch (error) {
-      console.error("Azure Blob deletion error:", error);
-      throw error;
-    }
-  };
+  try {
+    const blobServiceClient = BlobServiceClient.fromConnectionString(
+      process.env.AZURE_STORAGE_CONNECTION_STRING
+    );
+    
+    const containerClient = blobServiceClient.getContainerClient(
+      process.env.AZURE_STORAGE_CONTAINER_NAME
+    );
+
+    // แก้ไขการแยก blobName จาก URL
+    const url = new URL(blobUrl);
+    const blobName = url.pathname.split('/').slice(2).join('/'); // ✅ ได้ path เต็ม
+    
+    const blobClient = containerClient.getBlobClient(blobName);
+    
+    await blobClient.delete();
+    console.log(`Successfully deleted blob: ${blobName}`);
+    return true;
+  } catch (error) {
+    console.error("Azure Blob deletion error:", {
+      error: error.message,
+      blobUrl
+    });
+    throw error;
+  }
+};

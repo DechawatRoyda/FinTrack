@@ -5,7 +5,6 @@ import authenticateToken from "../middleware/auth.js";
 import multer from "multer";
 import { uploadToAzureBlob } from "../utils/azureStorage.js";
 import { generateRequestBlobPath } from "../utils/RequestsBlobHelper.js";
-
 import {
   checkWorkspaceAccessMiddleware,
   getUserId,
@@ -40,15 +39,31 @@ router.post(
     authenticateToken,
     checkWorkspaceAccessMiddleware,
     checkProjectWorkspace,
+    upload.single("requesterProof"),
     validateRequestItems,
     validateRequesterProof,
-    upload.single("requesterProof"),
   ],
   async (req, res) => {
     try {
       const workspace = req.workspaceId; // จาก middleware
       const userId = getUserId(req.user);
       const { amount, items, requesterProof } = req.body;
+
+      // ...existing code...
+      const workspaceObj = await Workspace.findById(workspace);
+      if (!workspaceObj) {
+        return res.status(404).json({
+          success: false,
+          message: "Workspace not found",
+        });
+      }
+      // เช็คว่า user นี้เป็น owner หรือไม่
+      if (workspaceObj.owner.toString() === userId.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: "Workspace owner cannot create a request",
+        });
+      }
 
       // อัพโหลดไฟล์ไปยัง Azure Blob ถ้ามีไฟล์แนบมา
       let requesterProofUrl = null;
@@ -213,9 +228,9 @@ router.put(
   "/:id",
   [
     authenticateToken,
+    upload.single("requesterProof"), // เพิ่ม multer middleware
     checkRequestStatus,
     validateRequestItems,
-    upload.single("requesterProof"), // เพิ่ม multer middleware
   ],
   async (req, res) => {
     const request = req.request;
@@ -224,7 +239,10 @@ router.put(
 
     try {
       // ตรวจสอบว่าเป็น requester
-      if (request.requester.toString() !== userId.toString()) {
+      const requesterId = request.requester._id
+        ? request.requester._id.toString()
+        : request.requester.toString();
+      if (requesterId !== userId.toString()) {
         return res.status(403).json({
           success: false,
           message: "Only requester can edit this request",
@@ -287,6 +305,8 @@ router.put(
     upload.single("ownerProof"),
   ],
   async (req, res) => {
+    let transaction; // <--- ประกาศไว้ด้านบน
+    let userId; // <--- ประกาศไว้ด้านบน
     try {
       const request = req.request;
       const { status } = req.body;
@@ -443,8 +463,14 @@ router.delete(
 
     try {
       // ตรวจสอบสิทธิ์
-      const isRequester = request.requester.toString() === userId.toString();
-      const isOwner = request.workspace.owner.toString() === userId.toString();
+      const isRequester =
+        (request.requester._id
+          ? request.requester._id.toString()
+          : request.requester.toString()) === userId.toString();
+      const isOwner =
+        (request.workspace.owner._id
+          ? request.workspace.owner._id.toString()
+          : request.workspace.owner.toString()) === userId.toString();
 
       if (!isRequester && !isOwner) {
         return res.status(403).json({
@@ -452,7 +478,6 @@ router.delete(
           message: "Unauthorized to delete this request",
         });
       }
-
       // ลบไฟล์จาก Azure Blob ถ้ามี
       if (
         request.requesterProof &&

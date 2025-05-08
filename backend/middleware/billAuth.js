@@ -4,10 +4,11 @@ import { getUserId } from "./workspaceAuth.js";
 // ตรวจสอบว่าเป็นผู้สร้างบิล
 export const checkBillCreator = async (req, res, next) => {
   const userId = getUserId(req.user);
-  const { billId } = req.params;
+  const billId = req.params.id; // แก้ตรงนี้
 
   try {
-    const bill = await Bill.findById(billId);
+    // filter ด้วย workspace ด้วย (ถ้ามี req.workspaceId)
+    const bill = await Bill.findOne({ _id: billId, workspace: req.workspaceId });
     if (!bill) {
       return res.status(404).json({
         success: false,
@@ -39,8 +40,10 @@ export const checkBillCreator = async (req, res, next) => {
 
 // ตรวจสอบสถานะบิล
 export const checkBillStatus = async (req, res, next) => {
+  const billId = req.params.id; // แก้ตรงนี้
   try {
-    const bill = await Bill.findById(req.params.billId)
+    // filter ด้วย workspace ด้วย (ถ้ามี req.workspaceId)
+    const bill = await Bill.findOne({ _id: billId, workspace: req.workspaceId })
       .populate({
         path: 'workspace',
         select: 'name type owner members'
@@ -49,7 +52,7 @@ export const checkBillStatus = async (req, res, next) => {
         path: 'creator.userId',
         select: 'name email'
       });
-      
+
     if (!bill) {
       return res.status(404).json({
         success: false,
