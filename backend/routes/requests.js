@@ -3,8 +3,14 @@ import Request from "../models/Request.js";
 import Workspace from "../models/Workspace.js";
 import authenticateToken from "../middleware/auth.js";
 import multer from "multer";
-import { uploadToAzureBlob } from "../utils/azureStorage.js";
-import { generateRequestBlobPath } from "../utils/RequestsBlobHelper.js";
+import {
+  uploadToAzureBlob,
+  deleteFromAzureBlob,
+} from "../utils/azureStorage.js";
+import {
+  generateRequestBlobPath,
+  getBlobPathFromUrl,
+} from "../utils/RequestsBlobHelper.js";
 import {
   checkWorkspaceAccessMiddleware,
   getUserId,
@@ -142,6 +148,7 @@ router.get(
         success: true,
         message: "Requests retrieved successfully",
         data: requests,
+        count: requests.length,
       });
     } catch (err) {
       console.error(`Error in ${req.method} ${req.originalUrl}:`, err);
@@ -149,6 +156,46 @@ router.get(
         success: false,
         message: "Failed to fetch requests",
         error: err.message,
+      });
+    }
+  }
+);
+// ได้ใช้ตอนเอาข้อมูลมาทำกราฟ
+/**
+ * @route GET /api/workspaces/:workspaceId/requests/my-requests
+ * @desc Get user's requests in workspace
+ */
+
+router.get(
+  "/my-requests",
+  [authenticateToken, checkWorkspaceAccessMiddleware],
+  async (req, res) => {
+    const workspace = req.workspaceId;
+    const userId = getUserId(req.user);
+
+    try {
+      const requests = await Request.find({
+        workspace,
+        requester: userId,
+      })
+        .populate("requester", "name email")
+        .populate("workspace", "name type")
+        .sort({ createdAt: -1 });
+
+      res.status(200).json({
+        success: true,
+        message: "User requests retrieved successfully",
+        data: requests,
+        count: requests.length,
+      });
+    } catch (err) {
+      console.error(`Error in ${req.method} ${req.originalUrl}:`, err);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch user requests",
+        error: err.message,
+        userId,
+        workspace,
       });
     }
   }
@@ -251,17 +298,40 @@ router.put(
 
       // อัพโหลดไฟล์ใหม่ถ้ามี
       if (req.file) {
-        const blobPath = generateRequestBlobPath("request-update", {
+        const timestamp = Date.now(); // เพิ่ม timestamp
+
+        // ใช้ path แบบเดียวกับตอนสร้าง request
+        const blobPath = generateRequestBlobPath("requester-proof", {
           userId,
+          workspaceId: request.workspace._id,
           requestId: request._id,
           originalname: req.file.originalname,
+          timestamp, // เพิ่ม timestamp ในการสร้าง path
         });
+
+        // ลบไฟล์เก่าถ้ามี
+        if (request.requesterProof?.includes(AZURE_BLOB_DOMAIN)) {
+          try {
+            await deleteFromAzureBlob(request.requesterProof);
+            console.log(
+              `Deleted old requester proof for request ${request._id}`
+            );
+          } catch (error) {
+            console.error("Error deleting old requester proof:", error);
+          }
+        }
+
+        // อัพโหลดไฟล์ใหม่พร้อม metadata เพิ่มเติม
         const newProofUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
           userId: userId.toString(),
           requestId: request._id.toString(),
-          type: "requester-proof-update",
+          type: "requester-proof",
+          timestamp: timestamp.toString(), // เพิ่ม timestamp ใน metadata
+          contentType: req.file.mimetype, // เพิ่ม content type
         });
-        request.requesterProof = newProofUrl;
+
+        // เพิ่ม query parameter สำหรับป้องกัน cache
+        request.requesterProof = `${newProofUrl}?t=${timestamp}`;
       }
 
       // อัพเดทข้อมูลอื่นๆ
@@ -305,8 +375,6 @@ router.put(
     upload.single("ownerProof"),
   ],
   async (req, res) => {
-    let transaction; // <--- ประกาศไว้ด้านบน
-    let userId; // <--- ประกาศไว้ด้านบน
     try {
       const request = req.request;
       const { status } = req.body;
@@ -335,9 +403,9 @@ router.put(
         });
       }
 
-      // 3. Handle approval with proof upload
+      // 3. Handle approval/rejection
       if (status === "approved") {
-        // Check if file is uploaded
+        // ตรวจสอบไฟล์แนบเมื่อ approve
         if (!req.file) {
           return res.status(400).json({
             success: false,
@@ -345,68 +413,63 @@ router.put(
           });
         }
 
-        try {
-          // Upload proof to Azure Blob
-          const blobPath = generateRequestBlobPath("owner-proof", {
-            userId,
-            requestId: request._id,
-            workspaceId: request.workspace,
-            originalname: req.file.originalname,
-          });
-          const ownerProofUrl = await uploadToAzureBlob(
-            req.file.buffer,
-            blobPath,
-            {
-              userId: userId.toString(),
-              requestId: request._id.toString(),
-              type: "owner-proof",
-            }
-          );
+        // Upload proof to Azure Blob
+        const blobPath = generateRequestBlobPath("owner-proof", {
+          userId,
+          requestId: request._id,
+          workspaceId: request.workspace,
+          originalname: req.file.originalname,
+        });
 
-          // Update request with proof URL
-          request.ownerProof = ownerProofUrl;
-          request.status = "completed";
+        const ownerProofUrl = await uploadToAzureBlob(
+          req.file.buffer,
+          blobPath,
+          {
+            userId: userId.toString(),
+            requestId: request._id.toString(),
+            type: "owner-proof",
+          }
+        );
 
-          // Create new transaction
-          const transaction = new Transaction({
-            user: request.requester,
-            workspace: request.workspace._id,
-            type: "Income",
-            amount: request.amount,
-            category: "Budget Request",
-            description: `Budget request approved by workspace owner`,
-            slip_image: ownerProofUrl,
-            reference: {
-              type: "Request",
-              id: request._id,
-            },
-            transaction_date: new Date(),
-            transaction_time: new Date().toLocaleTimeString(),
-          });
+        // Update request status and proof
+        request.ownerProof = ownerProofUrl;
+        request.status = "completed";
 
-          // Save transaction
-          await transaction.save();
-        } catch (uploadError) {
-          console.error("Error uploading proof:", uploadError);
-          return res.status(500).json({
-            success: false,
-            message: "Failed to upload payment proof",
-            error: uploadError.message,
-          });
-        }
+        // Create transaction record
+        const transaction = new Transaction({
+          user: request.requester,
+          workspace: request.workspace._id,
+          type: "Income",
+          amount: request.amount,
+          category: "Budget Request",
+          description: `Budget request approved by workspace owner`,
+          slip_image: ownerProofUrl,
+          reference: {
+            type: "Request",
+            id: request._id,
+          },
+          transaction_date: new Date(),
+          transaction_time: new Date().toLocaleTimeString(),
+        });
+
+        await transaction.save();
       } else {
         // Handle rejection
-        request.status = status;
+        const oldRequesterProof = request.requesterProof; // เก็บ URL เดิมไว้ก่อน
+
+        request.status = "rejected";
         request.rejectionReason = req.body.rejectionReason;
 
-        // ลบรูป requesterProof เมื่อ reject
-        if (request.requesterProof?.includes(AZURE_BLOB_DOMAIN)) {
+        // ลบไฟล์จาก Azure ถ้ามี
+        if (oldRequesterProof?.includes(AZURE_BLOB_DOMAIN)) {
           try {
-            await deleteFromAzureBlob(request.requesterProof);
-            request.requesterProof = null; // เคลียร์ URL หลังจากลบ
-            console.log(
-              `Deleted requester proof for rejected request ${request._id}`
-            );
+            const success = await deleteFromAzureBlob(oldRequesterProof);
+            if (success) {
+              console.log(
+                `Deleted requester proof for rejected request ${request._id}`
+              );
+              request.requesterProof = null; // เคลียร์ URL หลังจากลบไฟล์สำเร็จ
+            }
           } catch (error) {
             console.error("Error deleting requester proof:", error);
           }
@@ -426,7 +489,7 @@ router.put(
         },
       ];
 
-      // 5. Save changes
+      // 5. Save all changes
       await request.save();
 
       // 6. Send response
@@ -446,8 +509,7 @@ router.put(
         success: false,
         message: "Failed to update request status",
         error: err.message,
-        userId,
-        requestId: req.params.id, // ✅ เพิ่ม requestId ในการ log
+        requestId: req.params.id,
       });
     }
   }
@@ -467,6 +529,7 @@ router.delete(
         (request.requester._id
           ? request.requester._id.toString()
           : request.requester.toString()) === userId.toString();
+
       const isOwner =
         (request.workspace.owner._id
           ? request.workspace.owner._id.toString()
@@ -478,16 +541,21 @@ router.delete(
           message: "Unauthorized to delete this request",
         });
       }
-      // ลบไฟล์จาก Azure Blob ถ้ามี
+
+      // ลบไฟล์จาก Azure Blob
+      let deletedFiles = [];
+
       if (
         request.requesterProof &&
         request.requesterProof.includes(AZURE_BLOB_DOMAIN)
       ) {
         try {
-          // สร้างฟังก์ชัน deleteFromAzureBlob ใน azureStorage.js
-          await deleteFromAzureBlob(request.requesterProof);
+          const success = await deleteFromAzureBlob(request.requesterProof);
+          if (success) {
+            deletedFiles.push("requesterProof");
+          }
         } catch (error) {
-          console.error("Error deleting proof file:", error);
+          console.error("Error deleting requester proof:", error);
         }
       }
 
@@ -496,16 +564,22 @@ router.delete(
         request.ownerProof.includes(AZURE_BLOB_DOMAIN)
       ) {
         try {
-          await deleteFromAzureBlob(request.ownerProof);
+          const success = await deleteFromAzureBlob(request.ownerProof);
+          if (success) {
+            deletedFiles.push("ownerProof");
+          }
         } catch (error) {
-          console.error("Error deleting owner proof file:", error);
+          console.error("Error deleting owner proof:", error);
         }
       }
 
+      // ลบ request จาก database
       await request.deleteOne();
+
       res.json({
         success: true,
         message: "Request and associated files deleted successfully",
+        deletedFiles, // เพิ่มข้อมูลไฟล์ที่ถูกลบ
       });
     } catch (err) {
       console.error("Error deleting request:", err);
@@ -513,8 +587,8 @@ router.delete(
         success: false,
         message: "Failed to delete request",
         error: err.message,
-        requestId: req.params.id, // ✅ เพิ่ม requestId ในการ log
-        workspace: req.workspaceId, // ✅ เพิ่ม workspace ในการ log
+        requestId: req.params.id,
+        workspace: req.workspaceId,
       });
     }
   }

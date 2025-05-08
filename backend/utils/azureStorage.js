@@ -82,6 +82,21 @@ export const getUserBlobs = async (userId) => {
   
 };
 
+// Add getBlobPathFromUrl function
+const getBlobPathFromUrl = (url) => {
+  try {
+    const urlObj = new URL(url);
+    // Remove leading slash and container name from path
+    const pathParts = urlObj.pathname.split('/');
+    // Skip first empty string and container name
+    const blobPath = pathParts.slice(2).join('/');
+    return blobPath;
+  } catch (error) {
+    console.error('Error parsing blob URL:', error);
+    throw new Error(`Invalid blob URL format: ${url}`);
+  }
+};
+
 export const deleteFromAzureBlob = async (blobUrl) => {
   try {
     const blobServiceClient = BlobServiceClient.fromConnectionString(
@@ -92,19 +107,34 @@ export const deleteFromAzureBlob = async (blobUrl) => {
       process.env.AZURE_STORAGE_CONTAINER_NAME
     );
 
-    // แก้ไขการแยก blobName จาก URL
-    const url = new URL(blobUrl);
-    const blobName = url.pathname.split('/').slice(2).join('/'); // ✅ ได้ path เต็ม
+    // ใช้ฟังก์ชัน getBlobPathFromUrl เพื่อแยก path
+    const blobPath = getBlobPathFromUrl(blobUrl);
+    console.log('Attempting to delete blob:', {
+      url: blobUrl,
+      extractedPath: blobPath,
+      containerName: process.env.AZURE_STORAGE_CONTAINER_NAME
+    });
+
+    const blobClient = containerClient.getBlobClient(blobPath);
+    const exists = await blobClient.exists();
     
-    const blobClient = containerClient.getBlobClient(blobName);
+    if (!exists) {
+      console.log('Blob not found:', blobPath);
+      return false;
+    }
+
+    const response = await blobClient.delete();
+    console.log('Blob deleted successfully:', {
+      path: blobPath,
+      response: response._response.status
+    });
     
-    await blobClient.delete();
-    console.log(`Successfully deleted blob: ${blobName}`);
     return true;
   } catch (error) {
-    console.error("Azure Blob deletion error:", {
+    console.error('Azure Blob deletion error:', {
       error: error.message,
-      blobUrl
+      blobUrl,
+      stack: error.stack
     });
     throw error;
   }

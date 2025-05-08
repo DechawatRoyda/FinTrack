@@ -25,7 +25,9 @@ const requestSchema = new mongoose.Schema({
   // สลิปของ requester
   requesterProof: {
     type: String,
-    required: true,
+    required: function() {
+      return this.status === 'pending' || this.status === 'completed';
+    }
   },
   // สลิปของ owner
   ownerProof: {
