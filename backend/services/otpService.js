@@ -90,7 +90,7 @@ class OTPService {
         
         <div style="background-color: #ffffff; padding: 20px; text-align: center; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
           <strong style="font-size: 32px; letter-spacing: 8px; color: #2c3e50; display: block;">${otp}</strong>
-          <p style="color: #e74c3c; margin: 10px 0 0;">Expires in 1 minutes</p>
+          <p style="color: #e74c3c; margin: 10px 0 0;">Expires in 5 minutes</p>
         </div>
 
         <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee; color: #7f8c8d; font-size: 12px;">
@@ -108,7 +108,7 @@ class OTPService {
       }
 
       const otp = this.generateOTP();
-      const expiryTime = Date.now() + 1 * 60 * 1000; // 5 minutes
+      const expiryTime = Date.now() + 5 * 60 * 1000; // 5 minutes
 
       // ลบ OTP เก่าถ้ามี
       if (this.otpStore.has(email)) {
