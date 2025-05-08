@@ -14,14 +14,33 @@ export const validateEmailFormat = (req, res, next) => {
   
   export const validatePasswordStrength = (req, res, next) => {
     const { password } = req.body;
-    // อย่างน้อย 8 ตัว, มีตัวพิมพ์ใหญ่, พิมพ์เล็ก, ตัวเลข
-    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)[a-zA-Z\d]{8,}$/;
     
-    if (!passwordRegex.test(password)) {
+    // เพิ่มรูปแบบที่ยอมรับได้
+    const patterns = [
+      // Pattern 1: ต้องมีทั้งตัวพิมพ์เล็ก พิมพ์ใหญ่ และตัวเลข
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)[a-zA-Z\d]{8,}$/,
+      
+      // Pattern 2: ต้องมีตัวอักษร(พิมพ์เล็กหรือพิมพ์ใหญ่) และตัวเลข
+      /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/,
+      
+      // Pattern 3: ต้องมีตัวอักษร ตัวเลข และอักขระพิเศษ
+      /^(?=.*[A-Za-z])(?=.*\d)(?=.*[@$!%*#?&])[A-Za-z\d@$!%*#?&]{8,}$/,
+      
+      // Pattern 4: ต้องมีตัวอักษรและตัวเลข อนุญาตให้มีอักขระพิเศษได้
+      /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d@$!%*#?&]{8,}$/
+    ];
+  
+    // ตรวจสอบว่าตรงกับ pattern ใดๆ หรือไม่
+    const isValid = patterns.some(pattern => pattern.test(password));
+    
+    if (!isValid) {
       return res.status(400).json({
         success: false,
         message: "Weak password",
-        details: "Password must be at least 8 characters long and contain uppercase, lowercase, and numbers"
+        details: "Password must be at least 8 characters long and contain:\n" +
+                 "- Letters (uppercase or lowercase)\n" +
+                 "- Numbers\n" +
+                 "- Special characters are optional (@$!%*#?&)"
       });
     }
     next();
