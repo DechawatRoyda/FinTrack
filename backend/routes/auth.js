@@ -41,7 +41,6 @@ if (!JWT_SECRET) {
 // 📌 Register Route
 router.post(
   "/register",
-  validateEmailFormat,
   validatePasswordStrength,
   validateUsername,
   async (req, res) => {
@@ -409,7 +408,6 @@ router.post("/logout", authenticateToken, async (req, res) => {
 // Reset Password Route
 router.post(
   "/reset-password",
-  validateEmailFormat,
   validatePasswordStrength,
   async (req, res) => {
     try {
@@ -546,7 +544,6 @@ router.put(
   [
     authenticateToken,
     validateUserId,
-    validateEmailFormat,
     upload.single("avatar"), // รับไฟล์รูปโปรไฟล์
   ],
   async (req, res) => {
