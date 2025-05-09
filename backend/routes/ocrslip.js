@@ -2,7 +2,6 @@ import express from "express";
 import multer from "multer";
 import axios from "axios";
 import FormData from "form-data";
-import util from "util";
 import crypto from "crypto";
 import path from "path";
 import { uploadToAzureBlob } from "../utils/azureStorage.js";
@@ -11,269 +10,316 @@ import { authenticateToken, validateUserId } from "../middleware/auth.js";
 
 const router = express.Router();
 
-// สร้างฟังก์ชันสำหรับสร้าง hash จากไฟล์
-const generateFileHash = (buffer) => {
-  return crypto.createHash('md5').update(buffer).digest('hex');
-};
-
-// Cache สำหรับเก็บ hash ของรูปที่เคยอัพโหลด
+// Cache Configuration
+const CACHE_EXPIRY_MINUTES = 30;
 const processedImages = new Map();
 
-// กำหนดการตั้งค่า multer
+// Helper Functions
+const generateFileHash = (buffer) => {
+  return crypto.createHash("md5").update(buffer).digest("hex");
+};
+
+const parseAmount = (amountStr) => {
+  if (!amountStr) return 0;
+  const cleanAmount = amountStr.replace(/[^\d.-]/g, '');
+  return parseFloat(cleanAmount) || 0;
+};
+
+const parseDate = (dateStr) => {
+  if (!dateStr) return new Date();
+  try {
+    // Support multiple date formats
+    const patterns = [
+      // DD/MM/YY
+      {
+        regex: /(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{2})/,
+        parse: (m) => new Date(2000 + parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]))
+      },
+      // DD/MM/YYYY
+      {
+        regex: /(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{4})/,
+        parse: (m) => new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]))
+      }
+    ];
+
+    for (const pattern of patterns) {
+      const match = dateStr.match(pattern.regex);
+      if (match) {
+        const parsed = pattern.parse(match);
+        if (isNaN(parsed.getTime())) continue;
+        return parsed;
+      }
+    }
+    console.warn('No matching date pattern for:', dateStr);
+    return new Date();
+  } catch (error) {
+    console.warn('Date parsing error:', error);
+    return new Date();
+  }
+};
+
+const clearImageCache = (userId, minutes = CACHE_EXPIRY_MINUTES) => {
+  const now = Date.now();
+  const expiryTime = minutes * 60 * 1000;
+
+  for (const [key, value] of processedImages.entries()) {
+    if (now - value.timestamp > expiryTime || key.startsWith(`${userId}_`)) {
+      processedImages.delete(key);
+    }
+  }
+};
+
+// Multer Configuration
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
-    // ตรวจสอบ file type
-    const filetypes = /jpeg|jpg|png/;
-    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = filetypes.test(file.mimetype);
+    const ext = path.extname(file.originalname).toLowerCase();
+    console.log('Upload file:', { name: file.originalname, type: file.mimetype, ext });
 
-    if (extname && mimetype) {
+    const acceptedTypes = {
+      '.jpg': ['image/jpeg', 'image/jpg'],
+      '.jpeg': ['image/jpeg', 'image/jpg'],
+      '.png': ['image/png'],
+      '.jfif': ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/jfif', 'application/octet-stream'],
+      '.gif': ['image/gif'],
+      '.bmp': ['image/bmp'],
+      '.webp': ['image/webp'],
+      '.heic': ['image/heic'],
+      '.heif': ['image/heif']
+    };
+
+    if (!acceptedTypes[ext]) {
+      return cb(new Error(`Unsupported file type. Accepted: ${Object.keys(acceptedTypes).join(', ')}`));
+    }
+
+    if (acceptedTypes[ext].includes(file.mimetype)) {
       return cb(null, true);
     }
-    cb(new Error('Only image files (jpg, jpeg, png) are allowed'));
+
+    cb(new Error(`Invalid MIME type: ${file.mimetype}`));
   },
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB
-    files: 20 // จำนวนไฟล์สูงสุด
+    fileSize: 5 * 1024 * 1024,
+    files: 20
   }
 });
 
-// Route สำหรับเช็คไฟล์ซ้ำ
-router.post("/check-duplicates", 
-  authenticateToken, 
-  validateUserId, 
-  async (req, res) => {
-    try {
-      const { hashes } = req.body;
-      const userId = req.userId;
-
-      if (!Array.isArray(hashes)) {
-        return res.status(400).json({
-          success: false,
-          message: "hashes must be an array"
-        });
+// Create Transaction Data
+const createTransactionData = (ocrData, userId, blobUrl) => {
+  try {
+    return {
+      user: userId,
+      workspace: null,
+      type: "Expenses",
+      amount: parseAmount(ocrData.details.amounts?.[0]),
+      category: "Transfer",
+      description: `Transfer from ${ocrData.details.sender?.bank || 'Unknown'} to ${ocrData.details.receiver?.bank || 'Unknown'}`,
+      slip_image: blobUrl,
+      transaction_date: parseDate(ocrData.details.date),
+      transaction_time: ocrData.details.time?.[0] || new Date().toTimeString().split(' ')[0],
+      transaction_id: ocrData.details.transaction_id || 'N/A',
+      sender_info: {
+        name: ocrData.details.sender?.name || 'Unknown',
+        bank: ocrData.details.sender?.bank || 'Unknown'
+      },
+      receiver_info: {
+        name: ocrData.details.receiver?.name || 'Unknown',
+        bank: ocrData.details.receiver?.bank || 'Unknown'
+      },
+      reference: {
+        type: "Bill",
+        id: userId
+      },
+      metadata: {
+        raw_text: ocrData.raw,
+        formatted_text: ocrData.text,
+        processor_used: ocrData.processor_used,
+        original_amount: ocrData.details.amounts?.[0],
+        original_date: ocrData.details.date,
+        confidence: ocrData.details.confidence
       }
+    };
+  } catch (error) {
+    console.error('Transaction data creation error:', error);
+    throw error;
+  }
+};
 
-      const duplicates = hashes.filter(hash => 
-        processedImages.has(`${userId}_${hash}`)
-      );
-
-      res.json({
-        success: true,
-        duplicates: duplicates
-      });
-
-    } catch (error) {
-      console.error("Check duplicates error:", error);
-      res.status(500).json({
-        success: false,
-        message: "Failed to check duplicates",
-        error: error.message
-      });
-    }
+// Routes
+router.post("/clear-cache", [authenticateToken, validateUserId], 
+async (req, res) => {
+  try {
+    clearImageCache(req.userId);
+    res.json({ 
+      success: true, 
+      message: "Cache cleared" 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
 });
 
-// Route หลักสำหรับ OCR
-router.post(
-  "/upload",
-  authenticateToken,
-  validateUserId,
-  async (req, res) => {
-    try {
-      // ใช้ Promise เพื่อจัดการ upload middleware
-      await new Promise((resolve, reject) => {
-        upload.array('images')(req, res, (err) => {
-          if (err instanceof multer.MulterError) {
-            reject(new Error(`Upload error: ${err.message}`));
-          } else if (err) {
-            reject(err);
-          }
-          resolve();
-        });
+router.post("/check-duplicates", [authenticateToken, validateUserId], 
+async (req, res) => {
+  try {
+    const { hashes } = req.body;
+    if (!Array.isArray(hashes)) {
+      return res.status(400).json({
+        success: false,
+        message: "hashes must be an array"
       });
+    }
 
-      if (!req.files || req.files.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: "No files uploaded"
+    const duplicates = hashes.filter(hash => 
+      processedImages.has(`${req.userId}_${hash}`)
+    );
+
+    res.json({ success: true, duplicates });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+router.post("/upload", [authenticateToken, validateUserId], 
+async (req, res) => {
+  try {
+    // Clear old cache
+    clearImageCache(req.userId);
+
+    // Handle file upload
+    await new Promise((resolve, reject) => {
+      upload.array("images")(req, res, (err) => {
+        if (err) reject(err);
+        resolve();
+      });
+    });
+
+    if (!req.files?.length) {
+      return res.status(400).json({
+        success: false,
+        message: "No files uploaded"
+      });
+    }
+
+    // Process files
+    const newFiles = [];
+    const duplicates = [];
+    
+    // Check for duplicates
+    for (const file of req.files) {
+      const hash = generateFileHash(file.buffer);
+      const key = `${req.userId}_${hash}`;
+
+      if (!processedImages.has(key)) {
+        processedImages.set(key, {
+          timestamp: Date.now(),
+          filename: file.originalname
         });
+        newFiles.push(file);
+      } else {
+        duplicates.push(file.originalname);
       }
+    }
 
-      // กรองไฟล์ซ้ำ
-      const newFiles = [];
-      const duplicates = [];
-      
-      for (const file of req.files) {
-        const hash = generateFileHash(file.buffer);
-        const userId = req.userId;
-        const key = `${userId}_${hash}`;
-
-        if (!processedImages.has(key)) {
-          processedImages.set(key, {
-            timestamp: Date.now(),
-            filename: file.originalname
+    // Process new files
+    const results = await Promise.all(
+      newFiles.map(async (file) => {
+        try {
+          // Upload to Azure
+          const uniqueFilename = `ocr-${Date.now()}-${file.originalname}`;
+          const blobUrl = await uploadToAzureBlob(file.buffer, uniqueFilename, {
+            userId: req.userId,
+            type: "ocr-slip",
+            contentType: file.mimetype,
+            fileHash: generateFileHash(file.buffer)
           });
-          newFiles.push(file);
-        } else {
-          duplicates.push(file.originalname);
-        }
-      }
 
-      // ประมวลผลเฉพาะไฟล์ใหม่
-      const results = await Promise.all(
-        newFiles.map(async (file) => {
-          try {
-            // Upload to Azure Blob
-            const uniqueFilename = `ocr-${Date.now()}-${file.originalname}`;
-            const blobUrl = await uploadToAzureBlob(file.buffer, uniqueFilename, {
-              userId: req.userId,
-              type: "ocr-slip",
-              contentType: file.mimetype,
-              fileHash: generateFileHash(file.buffer)
-            });
+          // Send to OCR Service
+          const formData = new FormData();
+          formData.append("file", file.buffer, file.originalname);
 
-            // ส่งไปประมวลผล OCR ที่ FastAPI
-            const formData = new FormData();
-            formData.append("file", file.buffer, file.originalname);
+          const response = await axios.post(
+            process.env.FASTAPI_URL,
+            formData,
+            {
+              headers: formData.getHeaders(),
+              timeout: 30000
+            }
+          );
 
-            const response = await axios.post(
-              `${process.env.FASTAPI_URL}`,
-              formData,
-              {
-                headers: {
-                  ...formData.getHeaders(),
-                },
-              }
-            );
+          console.log('OCR Response:', {
+            filename: file.originalname,
+            raw: response.data.raw?.substring(0, 100),
+            text: response.data.text?.substring(0, 100),
+            details: response.data.details
+          });
 
-            // แปลงข้อมูล OCR เป็น Transaction
-            const ocrData = response.data.details;
-            const amount = parseFloat(
-              ocrData.amounts[0].replace(" บาท", "").replace(",", "")
-            );
-
-            // แปลงวันที่จากรูปแบบไทย
-            const dateStr = ocrData.date[0];
-            const [day, month, year] = dateStr
-              .match(/(\d+).*?(\d+).*?(\d+)/)
-              .slice(1);
-            const transaction_date = new Date(
-              parseInt(`25${year}`),
-              parseInt(month) - 1,
-              parseInt(day)
-            );
-
-            // สร้าง Transaction
-            const transactionData = {
-              user: req.userId,
-              workspace: null,
-              type: "Expenses",
-              amount: amount,
-              category: "Transfer",
-              description: `Transfer from ${ocrData.sender.bank} to ${ocrData.receiver.bank}`,
-              slip_image: blobUrl,
-              transaction_date: transaction_date,
-              transaction_time: ocrData.time[0],
-              transaction_id: ocrData.transaction_id,
-              sender_info: {
-                name: ocrData.sender.name,
-                bank: ocrData.sender.bank,
-              },
-              receiver_info: {
-                name: ocrData.receiver.name,
-                bank: ocrData.receiver.bank,
-              },
-              reference: {
-                type: "OCR",
-                id: req.userId
-              },
-            };
-
-            // บันทึกลง MongoDB
-            const transaction = new Transaction(transactionData);
-            await transaction.save();
-
-            return {
-              filename: file.originalname,
-              blobUrl: blobUrl,
-              success: true,
-              data: transactionData
-            };
-
-          } catch (error) {
-            console.error("File processing error:", error);
+          if (!response.data.details) {
             return {
               filename: file.originalname,
               success: false,
-              error: error.message
+              error: "OCR processing incomplete",
+              raw_text: response.data.raw,
+              formatted_text: response.data.text
             };
           }
-        })
-      );
 
-      res.json({
-        success: true,
-        totalFiles: newFiles.length,
-        duplicates: duplicates.length > 0 ? duplicates : undefined,
-        results: results
-      });
+          // Create and save transaction
+          const transactionData = createTransactionData(response.data, req.userId, blobUrl);
+          const transaction = new Transaction(transactionData);
+          await transaction.save();
 
-    } catch (error) {
-      console.error("OCR Upload Error:", error);
-      res.status(500).json({
-        success: false,
-        message: "OCR processing failed",
-        error: error.message
-      });
-    }
+          return {
+            filename: file.originalname,
+            blobUrl,
+            success: true,
+            data: {
+              ...transactionData,
+              original_ocr: {
+                raw: response.data.raw,
+                text: response.data.text
+              }
+            }
+          };
+
+        } catch (error) {
+          console.error('File processing error:', {
+            file: file.originalname,
+            error: error.message
+          });
+          
+          return {
+            filename: file.originalname,
+            success: false,
+            error: error.message,
+            raw_text: error.response?.data?.raw || error.response?.data?.text
+          };
+        }
+      })
+    );
+
+    res.json({
+      success: true,
+      totalFiles: newFiles.length,
+      duplicates: duplicates.length > 0 ? duplicates : undefined,
+      results
+    });
+
+  } catch (error) {
+    console.error("Upload error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Upload failed",
+      error: error.message
+    });
   }
-);
+});
 
 export default router;
-
-// ใช้กับ Flutter นะจ้ะ
-// class ImageUploader {
-//   Future<List<File>> filterDuplicateImages(List<File> images) async {
-//     // คำนวณ hash ของไฟล์ทั้งหมด
-//     final hashes = await Future.wait(
-//       images.map((file) => computeFileHash(file))
-//     );
-
-//     // เช็คกับเซิร์ฟเวอร์ว่ามีไฟล์ซ้ำไหม
-//     final response = await dio.post(
-//       '/api/ocr/check-duplicates',
-//       data: {'hashes': hashes}
-//     );
-
-//     final duplicateHashes = response.data['duplicates'] as List;
-    
-//     // กรองเอาเฉพาะไฟล์ที่ไม่ซ้ำ
-//     final newImages = images.where((file) {
-//       final hash = computeFileHash(file);
-//       return !duplicateHashes.contains(hash);
-//     }).toList();
-
-//     return newImages;
-//   }
-
-//   Future<void> uploadImages(List<File> images) async {
-//     // กรองไฟล์ซ้ำก่อน
-//     final uniqueImages = await filterDuplicateImages(images);
-    
-//     if (uniqueImages.isEmpty) {
-//       print('No new images to upload');
-//       return;
-//     }
-
-//     // อัพโหลดเฉพาะไฟล์ที่ไม่ซ้ำ
-//     await dio.post('/api/ocr/upload', 
-//       data: FormData.fromMap({
-//         'images': uniqueImages.map((f) => 
-//           MultipartFile.fromFileSync(f.path)
-//         ).toList()
-//       })
-//     );
-//   }
-// }
