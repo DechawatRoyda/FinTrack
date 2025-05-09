@@ -130,12 +130,36 @@ router.get("/:workspaceId", [
 ], async (req, res) => {
   try {
     const workspace = req.workspace;
-    const populated = await workspace.populate("members.user");
+        // Populate เฉพาะฟิลด์ที่จำเป็นของ members.user
+    const populated = await workspace.populate({
+      path: 'members.user',
+      select: 'name email numberAccount avatar_url' // เลือกเฉพาะฟิลด์ที่ต้องการ
+    });
+        // สร้าง response object ที่มีเฉพาะข้อมูลที่จำเป็น
+    const responseData = {
+      _id: populated._id,
+      name: populated.name,
+      owner: populated.owner,
+      type: populated.type,
+      budget: populated.budget,
+      members: populated.members.map(member => ({
+        user: {
+          _id: member.user._id,
+          name: member.user.name,
+          email: member.user.email,
+          numberAccount: member.user.numberAccount,
+          avatar_url: member.user.avatar_url
+        },
+        join_at: member.join_at
+      })),
+      createdAt: populated.createdAt,
+      updatedAt: populated.updatedAt
+    };
 
     res.status(200).json({
       success: true,
       message: "Workspace retrieved successfully",
-      data: populated
+      data: responseData
     });
   } catch (err) {
     console.error(`Error fetching workspace:`, {
@@ -215,7 +239,15 @@ router.post("/:workspaceId/member", [
 ], async (req, res) => {
   try {
     const workspace = req.workspace;
-    const { userId } = req.body;
+    const { email } = req.body;
+
+    // Validate required fields
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required"
+      });
+    }
 
     // Validate owner
     if (workspace.owner.toString() !== req.user.id) {
@@ -226,7 +258,7 @@ router.post("/:workspaceId/member", [
     }
 
     // Check if user exists
-    const user = await User.findById(userId);
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -236,7 +268,7 @@ router.post("/:workspaceId/member", [
 
     // Check if already member
     const isAlreadyMember = workspace.members.some(
-      member => member.user.toString() === userId
+      member => member.user.toString() === user._id.toString()
     );
     if (isAlreadyMember) {
       return res.status(400).json({
@@ -247,24 +279,48 @@ router.post("/:workspaceId/member", [
 
     // Add member
     workspace.members.push({
-      user: userId,
+      user: user._id,
       join_at: new Date()
     });
     await workspace.save();
 
-    const updated = await workspace.populate("members.user");
+    // Populate และเลือกเฉพาะข้อมูลที่จำเป็น
+    const populated = await workspace.populate({
+      path: 'members.user',
+      select: 'name email numberAccount avatar_url'
+    });
+
+    // สร้าง response object
+    const responseData = {
+      _id: populated._id,
+      name: populated.name,
+      owner: populated.owner,
+      type: populated.type,
+      budget: populated.budget,
+      members: populated.members.map(member => ({
+        user: {
+          _id: member.user._id,
+          name: member.user.name,
+          email: member.user.email,
+          numberAccount: member.user.numberAccount,
+          avatar_url: member.user.avatar_url
+        },
+        join_at: member.join_at
+      }))
+    };
 
     res.status(200).json({
       success: true,
       message: "Member added successfully",
-      data: updated
+      data: responseData
     });
+
   } catch (err) {
     console.error(`Error adding member:`, {
       error: err.message,
       userId: req.user?.id,
       workspaceId: req.params.workspaceId,
-      memberId: req.body.userId
+      email: req.body.email
     });
     res.status(500).json({
       success: false,

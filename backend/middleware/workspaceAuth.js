@@ -17,7 +17,7 @@ export const checkWorkspaceAccess = async (workspaceId, userId) => {
     // ตรวจสอบว่าเป็น owner หรือ member
     const isOwner = workspace.owner.toString() === userId.toString();
     const isMember = workspace.members.some(
-      member => member.user.toString() === userId.toString()
+      (member) => member.user.toString() === userId.toString()
     );
 
     return isOwner || isMember;
@@ -37,17 +37,25 @@ export const checkWorkspaceAccessMiddleware = async (req, res, next) => {
       });
     }
 
-    // ใช้ workspaceId ที่ถูกส่งมาจาก server.js
-    const workspaceId = req.workspaceId;
-    if (!workspaceId) {
-      return res.status(400).json({
+    // ใช้ workspaceId จาก params แทน
+    const workspaceId = req.params.workspaceId;
+    
+    // workspace ควรมาจาก validateWorkspaceOperation แล้ว
+    const workspace = req.workspace;
+    if (!workspace) {
+      return res.status(404).json({
         success: false,
-        message: "Workspace ID is required"
+        message: "Workspace not found"
       });
     }
 
-    const hasAccess = await checkWorkspaceAccess(workspaceId, userId);
-    if (!hasAccess) {
+    // เช็คสิทธิ์การเข้าถึง
+    const isOwner = workspace.owner.toString() === userId.toString();
+    const isMember = workspace.members.some(
+      member => member.user.toString() === userId.toString()
+    );
+
+    if (!isOwner && !isMember) {
       return res.status(403).json({
         success: false,
         message: "Access denied to this workspace"
@@ -66,22 +74,29 @@ export const checkWorkspaceAccessMiddleware = async (req, res, next) => {
 };
 
 export const validateWorkspaceOperation = async (req, res, next) => {
+  const workspaceId = req.params.workspaceId;
+
+  if (!workspaceId) {
+    return res.status(400).json({
+      success: false,
+      message: "Workspace ID is required"
+    });
+  }
+
   try {
-    const workspace = await Workspace.findById(req.params.workspaceId);
+    const workspace = await Workspace.findById(workspaceId);
     if (!workspace) {
       return res.status(404).json({
         success: false,
         message: "Workspace not found"
       });
     }
+
+    // เก็บ workspace ไว้ใช้ใน middleware ถัดไป
     req.workspace = workspace;
     next();
   } catch (err) {
-    console.error(`Error validating workspace:`, {
-      error: err.message,
-      userId: req.user?.id,
-      workspaceId: req.params.workspaceId
-    });
+    console.error("Error validating workspace:", err);
     res.status(500).json({
       success: false,
       message: "Failed to validate workspace",
@@ -94,5 +109,5 @@ export default {
   getUserId,
   checkWorkspaceAccess,
   checkWorkspaceAccessMiddleware,
-  validateWorkspaceOperation
+  validateWorkspaceOperation,
 };

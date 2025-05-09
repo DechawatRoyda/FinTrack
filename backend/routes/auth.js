@@ -519,11 +519,63 @@ router.get("/users", authenticateToken, checkAdminRole, async (req, res) => {
   }
 });
 
+// 📌 Get Current User Profile
+router.get("/me", authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id)
+      .select("-password")
+      .select("-refreshTokens");
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    // Get active sessions
+    const activeSessions = await Session.find({
+      userId: user._id,
+      isValid: true
+    }).select("createdAt lastActivity userAgent ipAddress");
+
+    res.json({
+      success: true,
+      data: {
+        user: {
+          _id: user._id,
+          username: user.username,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          phone: user.phone,
+          numberAccount: user.numberAccount,
+          max_limit_expense: user.max_limit_expense,
+          avatar_url: user.avatar_url,
+          isActive: user.isActive,
+          lastLogin: user.lastLogin,
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt
+        },
+        activeSessions
+      }
+    });
+
+  } catch (err) {
+    console.error("Get profile error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch user profile",
+      error: err.message
+    });
+  }
+});
+
 // 📌 Get User by ID
 router.get(
   "/users/:userId",
   authenticateToken,
-  checkUserAccess,
+  checkAdminRole,
   async (req, res) => {
     try {
       const user = await User.findById(req.params.userId, "-password");
