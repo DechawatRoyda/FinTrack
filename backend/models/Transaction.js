@@ -9,7 +9,8 @@ const transactionSchema = new mongoose.Schema({
   workspace: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Workspace",
-    default: null
+    default: null,
+    required: false // เพิ่มบรรทัดนี้ให้ชัดเจน
   },
   type: {
     type: String,
@@ -22,10 +23,12 @@ const transactionSchema = new mongoose.Schema({
   },
   category: {
     type: String,
+    required: false,
     default: 'Transfer'
   },
   description: {
-    type: String
+    type: String,
+    required: false,
   },
   slip_image: {
     type: String,
@@ -33,9 +36,12 @@ const transactionSchema = new mongoose.Schema({
   },
   transaction_date: {
     type: Date,
-    required: true
+    required: false
   },
-  transaction_time: String,
+  transaction_time: {
+    type: String,
+    required: false
+  },
   transaction_id: String,
   sender_info: {
     name: String,

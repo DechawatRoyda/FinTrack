@@ -5,6 +5,7 @@ export const generateRequestBlobPath = (type, params) => {
     : ".jpg";
 
   const paths = {
+    "request-create": `requests/${params.workspaceId}/requester/${params.userId}/${timestamp}${extension}`,
     // ใช้ path เดียวสำหรับ requester proof แต่เพิ่ม timestamp
     "requester-proof": `requests/${params.workspaceId}/requester/${params.userId}/${params.requestId}_${timestamp}${extension}`,
     

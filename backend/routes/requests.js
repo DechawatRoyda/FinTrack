@@ -13,6 +13,7 @@ import {
 } from "../utils/RequestsBlobHelper.js";
 import {
   checkWorkspaceAccessMiddleware,
+  validateWorkspaceOperation,
   getUserId,
 } from "../middleware/workspaceAuth.js";
 import {
@@ -43,6 +44,7 @@ router.post(
   "/",
   [
     authenticateToken,
+    validateWorkspaceOperation,
     checkWorkspaceAccessMiddleware,
     checkProjectWorkspace,
     upload.single("requesterProof"),
@@ -51,20 +53,12 @@ router.post(
   ],
   async (req, res) => {
     try {
-      const workspace = req.workspaceId; // จาก middleware
+      const workspace = req.workspace; // จาก middleware
       const userId = getUserId(req.user);
       const { amount, items, requesterProof } = req.body;
 
-      // ...existing code...
-      const workspaceObj = await Workspace.findById(workspace);
-      if (!workspaceObj) {
-        return res.status(404).json({
-          success: false,
-          message: "Workspace not found",
-        });
-      }
       // เช็คว่า user นี้เป็น owner หรือไม่
-      if (workspaceObj.owner.toString() === userId.toString()) {
+      if (workspace.owner.toString() === userId.toString()) {
         return res.status(403).json({
           success: false,
           message: "Workspace owner cannot create a request",
@@ -76,23 +70,23 @@ router.post(
       if (req.file) {
         const blobPath = generateRequestBlobPath("request-create", {
           userId,
-          workspaceId: workspace,
+          workspaceId: workspace._id,
           originalname: req.file.originalname,
         });
         requesterProofUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
           userId: userId.toString(),
-          workspaceId: workspace.toString(),
+          workspaceId: workspace._id.toString(),
           type: "requester-proof",
           contentType: req.file.mimetype,
         });
       }
 
       const request = new Request({
-        workspace,
+        workspace: workspace._id,
         requester: userId,
         amount,
         items,
-        requesterProof: requesterProofUrl || req.body.requesterProof,
+        requesterProof: requesterProofUrl,
         status: "pending",
       });
 
@@ -127,31 +121,41 @@ router.post(
 // 2️⃣ ดึงรายการขอเบิกงบของ Workspace (GET /requests/:workspaceId)
 router.get(
   "/",
-  [authenticateToken, checkWorkspaceAccessMiddleware],
+  [
+    authenticateToken,
+    validateWorkspaceOperation,
+    checkWorkspaceAccessMiddleware,
+  ],
   async (req, res) => {
-    const workspace = req.workspaceId; // ✅ ใช้จาก middleware
+    const workspace = req.workspace;
+    console.log("Debug - GET requests:", {
+      workspaceId: workspace._id,
+      userId: getUserId(req.user),
+    });
 
     try {
-      const requests = await Request.find({ workspace })
+      const requests = await Request.find({ workspace: workspace._id })
         .populate("requester", "name email")
         .populate("workspace", "name type")
         .sort({ createdAt: -1 }); // เพิ่ม sorting
-
-      if (!requests.length) {
-        return res.status(404).json({
-          success: false,
-          message: "No requests found for this workspace",
-        });
-      }
 
       res.status(200).json({
         success: true,
         message: "Requests retrieved successfully",
         data: requests,
         count: requests.length,
+        workspace: {
+          _id: workspace._id,
+          name: workspace.name,
+          type: workspace.type,
+        },
       });
     } catch (err) {
-      console.error(`Error in ${req.method} ${req.originalUrl}:`, err);
+      console.error("Error fetching requests:", {
+        error: err.message,
+        workspace: req.params.workspaceId,
+        userId: req.user?.id,
+      });
       res.status(500).json({
         success: false,
         message: "Failed to fetch requests",
@@ -168,14 +172,23 @@ router.get(
 
 router.get(
   "/my-requests",
-  [authenticateToken, checkWorkspaceAccessMiddleware],
+  [
+    authenticateToken,
+    validateWorkspaceOperation,
+    checkWorkspaceAccessMiddleware,
+  ],
   async (req, res) => {
-    const workspace = req.workspaceId;
-    const userId = getUserId(req.user);
-
     try {
+      const workspace = req.workspace;
+      const userId = getUserId(req.user);
+
+      console.log("Debug - GET my-requests:", {
+        workspaceId: workspace._id,
+        userId: userId,
+      });
+
       const requests = await Request.find({
-        workspace,
+        workspace: workspace._id,
         requester: userId,
       })
         .populate("requester", "name email")
@@ -187,15 +200,23 @@ router.get(
         message: "User requests retrieved successfully",
         data: requests,
         count: requests.length,
+        workspace: {
+          _id: workspace._id,
+          name: workspace.name,
+          type: workspace.type,
+        },
       });
     } catch (err) {
-      console.error(`Error in ${req.method} ${req.originalUrl}:`, err);
+      console.error("Error fetching user requests:", {
+        error: err.message,
+        userId: req.user?.id,
+        workspace: req.params.workspaceId,
+      });
+
       res.status(500).json({
         success: false,
         message: "Failed to fetch user requests",
         error: err.message,
-        userId,
-        workspace,
       });
     }
   }
@@ -275,7 +296,7 @@ router.put(
   "/:id",
   [
     authenticateToken,
-    upload.single("requesterProof"), // เพิ่ม multer middleware
+    upload.single("requesterProof"),
     checkRequestStatus,
     validateRequestItems,
   ],
@@ -296,42 +317,45 @@ router.put(
         });
       }
 
-      // อัพโหลดไฟล์ใหม่ถ้ามี
+      // อัพเดทไฟล์ถ้ามีการอัพโหลดใหม่
       if (req.file) {
-        const timestamp = Date.now(); // เพิ่ม timestamp
-
-        // ใช้ path แบบเดียวกับตอนสร้าง request
-        const blobPath = generateRequestBlobPath("requester-proof", {
-          userId,
-          workspaceId: request.workspace._id,
-          requestId: request._id,
-          originalname: req.file.originalname,
-          timestamp, // เพิ่ม timestamp ในการสร้าง path
-        });
-
-        // ลบไฟล์เก่าถ้ามี
-        if (request.requesterProof?.includes(AZURE_BLOB_DOMAIN)) {
-          try {
+        try {
+          // 1. ลบไฟล์เก่าก่อน
+          if (request.requesterProof?.includes(AZURE_BLOB_DOMAIN)) {
             await deleteFromAzureBlob(request.requesterProof);
             console.log(
               `Deleted old requester proof for request ${request._id}`
             );
-          } catch (error) {
-            console.error("Error deleting old requester proof:", error);
           }
+
+          // 2. ใช้ path เดียวกับตอนสร้าง
+          const blobPath = generateRequestBlobPath("request-create", {
+            userId,
+            workspaceId: request.workspace._id,
+            originalname: req.file.originalname,
+          });
+
+          // 3. อัพโหลดไฟล์ใหม่
+          const newProofUrl = await uploadToAzureBlob(
+            req.file.buffer,
+            blobPath,
+            {
+              userId: userId.toString(),
+              workspaceId: request.workspace._id.toString(),
+              type: "requester-proof",
+              contentType: req.file.mimetype,
+            }
+          );
+
+          request.requesterProof = newProofUrl;
+        } catch (uploadError) {
+          console.error("Error handling file update:", uploadError);
+          return res.status(500).json({
+            success: false,
+            message: "Failed to update proof file",
+            error: uploadError.message,
+          });
         }
-
-        // อัพโหลดไฟล์ใหม่พร้อม metadata เพิ่มเติม
-        const newProofUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
-          userId: userId.toString(),
-          requestId: request._id.toString(),
-          type: "requester-proof",
-          timestamp: timestamp.toString(), // เพิ่ม timestamp ใน metadata
-          contentType: req.file.mimetype, // เพิ่ม content type
-        });
-
-        // เพิ่ม query parameter สำหรับป้องกัน cache
-        request.requesterProof = `${newProofUrl}?t=${timestamp}`;
       }
 
       // อัพเดทข้อมูลอื่นๆ
@@ -342,10 +366,21 @@ router.put(
 
       await request.save();
 
+      // ส่งข้อมูลกลับในรูปแบบเดียวกับ GET
+      const updatedRequest = {
+        ...request.toObject(),
+        requesterProof: request.requesterProof
+          ? {
+              url: request.requesterProof,
+              path: new URL(request.requesterProof).pathname,
+            }
+          : null,
+      };
+
       res.json({
         success: true,
         message: "Request updated successfully",
-        data: request,
+        data: updatedRequest,
       });
     } catch (err) {
       console.error("Error updating request:", err);
@@ -353,8 +388,6 @@ router.put(
         success: false,
         message: "Failed to update request",
         error: err.message,
-        userId,
-        requestId: req.params.id, // ✅ เพิ่ม requestId ในการ log
       });
     }
   }
@@ -379,6 +412,7 @@ router.put(
       const request = req.request;
       const { status } = req.body;
       const userId = getUserId(req.user);
+      let transaction; // ประกาศตัวแปรไว้ใช้ทั้ง scope
 
       // 1. Validate status
       if (!["approved", "rejected"].includes(status)) {
@@ -413,11 +447,27 @@ router.put(
           });
         }
 
+        // สร้าง transaction ก่อน
+        transaction = new Transaction({
+          user: request.requester,
+          workspace: request.workspace._id,
+          type: "Income",
+          amount: request.amount,
+          category: "Budget Request",
+          description: `Budget request approved by workspace owner`,
+          transaction_date: new Date(),
+          transaction_time: new Date().toLocaleTimeString(),
+          reference: {
+            type: "Request",
+            id: request._id,
+          },
+        });
+
         // Upload proof to Azure Blob
         const blobPath = generateRequestBlobPath("owner-proof", {
           userId,
           requestId: request._id,
-          workspaceId: request.workspace,
+          workspaceId: request.workspace._id,
           originalname: req.file.originalname,
         });
 
@@ -428,48 +478,37 @@ router.put(
             userId: userId.toString(),
             requestId: request._id.toString(),
             type: "owner-proof",
+            contentType: req.file.mimetype,
           }
         );
 
-        // Update request status and proof
+        // อัพเดต request และ transaction
         request.ownerProof = ownerProofUrl;
         request.status = "completed";
+        transaction.slip_image = ownerProofUrl;
 
-        // Create transaction record
-        const transaction = new Transaction({
-          user: request.requester,
-          workspace: request.workspace._id,
-          type: "Income",
-          amount: request.amount,
-          category: "Budget Request",
-          description: `Budget request approved by workspace owner`,
-          slip_image: ownerProofUrl,
-          reference: {
-            type: "Request",
-            id: request._id,
-          },
-          transaction_date: new Date(),
-          transaction_time: new Date().toLocaleTimeString(),
-        });
-
+        // บันทึก transaction
         await transaction.save();
       } else {
         // Handle rejection
-        const oldRequesterProof = request.requesterProof; // เก็บ URL เดิมไว้ก่อน
+        if (!req.body.rejectionReason) {
+          return res.status(400).json({
+            success: false,
+            message: "Rejection reason is required",
+          });
+        }
 
         request.status = "rejected";
         request.rejectionReason = req.body.rejectionReason;
 
-        // ลบไฟล์จาก Azure ถ้ามี
-        if (oldRequesterProof?.includes(AZURE_BLOB_DOMAIN)) {
+        // ลบไฟล์ requester proof ถ้ามี
+        if (request.requesterProof?.includes(AZURE_BLOB_DOMAIN)) {
           try {
-            const success = await deleteFromAzureBlob(oldRequesterProof);
-            if (success) {
-              console.log(
-                `Deleted requester proof for rejected request ${request._id}`
-              );
-              request.requesterProof = null; // เคลียร์ URL หลังจากลบไฟล์สำเร็จ
-            }
+            await deleteFromAzureBlob(request.requesterProof);
+            console.log(
+              `Deleted requester proof for rejected request ${request._id}`
+            );
+            request.requesterProof = null;
           } catch (error) {
             console.error("Error deleting requester proof:", error);
           }
@@ -489,7 +528,7 @@ router.put(
         },
       ];
 
-      // 5. Save all changes
+      // 5. Save request changes
       await request.save();
 
       // 6. Send response
@@ -499,12 +538,42 @@ router.put(
           status === "approved" ? "approved and completed" : "rejected"
         } successfully`,
         data: {
-          request,
-          transaction: status === "approved" ? transaction : undefined,
+          request: {
+            ...request.toObject(),
+            ownerProof: request.ownerProof
+              ? {
+                  url: request.ownerProof,
+                  path: new URL(request.ownerProof).pathname,
+                }
+              : null,
+            requesterProof: request.requesterProof
+              ? {
+                  url: request.requesterProof,
+                  path: new URL(request.requesterProof).pathname,
+                }
+              : null,
+          },
+          transaction: transaction
+            ? {
+                ...transaction.toObject(),
+                slip_image: transaction.slip_image
+                  ? {
+                      url: transaction.slip_image,
+                      path: new URL(transaction.slip_image).pathname,
+                    }
+                  : null,
+              }
+            : undefined,
         },
       });
     } catch (err) {
-      console.error("Error updating request status:", err);
+      console.error("Error updating request status:", {
+        error: err.message,
+        stack: err.stack,
+        requestId: req.params.id,
+        userId: req.user?.id,
+      });
+
       res.status(500).json({
         success: false,
         message: "Failed to update request status",

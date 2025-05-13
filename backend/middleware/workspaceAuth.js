@@ -73,18 +73,16 @@ export const checkWorkspaceAccessMiddleware = async (req, res, next) => {
   }
 };
 
-export const validateWorkspaceOperation = async (req, res, next) => {
-  const workspaceId = req.params.workspaceId;
-
-  if (!workspaceId) {
-    return res.status(400).json({
-      success: false,
-      message: "Workspace ID is required"
-    });
-  }
-
+// 1. Middleware สำหรับ bills
+export const checkWorkspaceBillAccess = async (req, res, next) => {
   try {
-    const workspace = await Workspace.findById(workspaceId);
+    const userId = getUserId(req.user);
+    console.log("Debug - Checking bill workspace access:", {
+      workspaceId: req.workspaceId,
+      userId
+    });
+
+    const workspace = await Workspace.findById(req.workspaceId);
     if (!workspace) {
       return res.status(404).json({
         success: false,
@@ -92,15 +90,60 @@ export const validateWorkspaceOperation = async (req, res, next) => {
       });
     }
 
-    // เก็บ workspace ไว้ใช้ใน middleware ถัดไป
+    // เช็คสิทธิ์การเข้าถึง
+    const isOwner = workspace.owner.toString() === userId.toString();
+    const isMember = workspace.members.some(
+      member => member.user.toString() === userId.toString()
+    );
+
+    if (!isOwner && !isMember) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to access this workspace"
+      });
+    }
+
     req.workspace = workspace;
     next();
   } catch (err) {
-    console.error("Error validating workspace:", err);
+    console.error("Workspace bill access check error:", err);
     res.status(500).json({
       success: false,
-      message: "Failed to validate workspace",
+      message: "Error checking workspace access",
       error: err.message
+    });
+  }
+};
+
+export const validateWorkspaceOperation = async (req, res, next) => {
+  try {
+    const workspaceId = req.workspaceId || req.params.workspaceId;
+    console.log("Debug - Validating workspace:", { workspaceId });
+
+    if (!workspaceId) {
+      return res.status(400).json({
+        success: false,
+        message: "Workspace ID is required"
+      });
+    }
+
+    const workspace = await Workspace.findById(workspaceId);
+    
+    if (!workspace) {
+      return res.status(404).json({
+        success: false,
+        message: "Workspace not found"
+      });
+    }
+
+    req.workspace = workspace;
+    next();
+  } catch (error) {
+    console.error("Workspace validation error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error validating workspace",
+      error: error.message
     });
   }
 };

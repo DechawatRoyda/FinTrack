@@ -22,6 +22,7 @@ router.post("/", [
     const { name, type, budget, members } = req.body;
     const owner = req.user.id;
 
+    // Validate required fields
     if (!name || !type) {
       return res.status(400).json({
         success: false,
@@ -29,22 +30,58 @@ router.post("/", [
       });
     }
 
-    // เพิ่มการค้นหา User จาก Email
+    // Get owner's information first
+    const ownerUser = await User.findById(owner);
+    if (!ownerUser) {
+      return res.status(404).json({
+        success: false,
+        message: "Owner user not found"
+      });
+    }
+
+    // Process members if provided
     let memberUsers = [];
     if (members?.length) {
       try {
+        // Create Set of unique emails for validation
+        const memberEmails = new Set(members.map(m => m.email.toLowerCase()));
+        
+        // Check if owner's email is in members list
+        if (memberEmails.has(ownerUser.email.toLowerCase())) {
+          return res.status(400).json({
+            success: false,
+            message: "Cannot add workspace owner as a member",
+            details: `Email ${ownerUser.email} belongs to workspace owner`
+          });
+        }
+
+        // Check for duplicate emails in members list
+        if (memberEmails.size !== members.length) {
+          return res.status(400).json({
+            success: false,
+            message: "Duplicate member emails found",
+            details: "Each member must have a unique email address"
+          });
+        }
+
+        // Find and validate all members
         memberUsers = await Promise.all(
           members.map(async (member) => {
-            const user = await User.findOne({ email: member.email });
+            const user = await User.findOne({ 
+              email: { $regex: new RegExp(`^${member.email}$`, 'i') }
+            });
+            
             if (!user) {
               throw new Error(`User with email ${member.email} not found`);
             }
+
             return {
               user: user._id,
               join_at: new Date()
             };
           })
         );
+
       } catch (error) {
         return res.status(404).json({
           success: false,
@@ -53,29 +90,42 @@ router.post("/", [
       }
     }
 
+    // Create workspace with owner as first member
     const workspace = new Workspace({
       name,
       owner,
       type,
       budget: budget || 0,
-      members: memberUsers.length ? memberUsers : [{ user: owner, join_at: new Date() }],
+      members: [
+        { user: owner, join_at: new Date() },
+        ...memberUsers
+      ],
       createdAt: new Date(),
       updatedAt: new Date()
     });
 
     await workspace.save();
-    const populatedWorkspace = await workspace.populate("members.user", "username name email");
+    
+    // Populate member details for response
+    const populatedWorkspace = await workspace.populate({
+      path: "members.user",
+      select: "username name email"
+    });
 
     res.status(201).json({
       success: true,
       message: "Workspace created successfully",
       data: populatedWorkspace
     });
+
   } catch (err) {
-    console.error(`Error creating workspace:`, {
+    console.error("Error creating workspace:", {
       error: err.message,
-      userId: req.user?.id
+      stack: err.stack,
+      userId: req.user?.id,
+      body: req.body
     });
+    
     res.status(500).json({
       success: false,
       message: "Failed to create workspace",

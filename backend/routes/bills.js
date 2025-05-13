@@ -13,7 +13,7 @@ import {
 import { generateBillBlobPath } from "../utils/BillsBlobHelper.js";
 
 import {
-  checkWorkspaceAccessMiddleware,
+  checkWorkspaceBillAccess,
   getUserId,
 } from "../middleware/workspaceAuth.js";
 import { checkBillCreator, checkBillStatus } from "../middleware/billAuth.js";
@@ -28,24 +28,24 @@ async function deleteFileFromAzure(fileUrl, metadata = {}) {
 
   try {
     const url = new URL(fileUrl);
-    const blobPath = url.pathname.split('/').slice(2).join('/');
+    const blobPath = url.pathname.split("/").slice(2).join("/");
     await deleteFromAzureBlob(fileUrl);
     return {
       success: true,
       path: blobPath,
-      ...metadata
+      ...metadata,
     };
   } catch (error) {
     console.error("Error deleting file:", {
       error: error.message,
       url: fileUrl,
-      ...metadata
+      ...metadata,
     });
     return {
       success: false,
       url: fileUrl,
       error: error.message,
-      ...metadata
+      ...metadata,
     };
   }
 }
@@ -70,7 +70,7 @@ router.post(
   [
     authenticateToken,
     validateUserId,
-    checkWorkspaceAccessMiddleware,
+    checkWorkspaceBillAccess,
     // ถ้า validateBillCreation เช็ค items จาก req.body.items เท่านั้น ให้ย้ายไปเช็คเองใน handler
     upload.single("eSlip"),
   ],
@@ -271,7 +271,7 @@ router.post(
 // 2️⃣ ดึงข้อมูลบิลทั้งหมดใน workspace
 router.get(
   "/",
-  [authenticateToken, validateUserId, checkWorkspaceAccessMiddleware],
+  [authenticateToken, validateUserId, checkWorkspaceBillAccess],
   async (req, res) => {
     try {
       const bills = await Bill.find({ workspace: req.workspaceId })
@@ -280,7 +280,7 @@ router.get(
         .populate("items.sharedWith.user", "name email");
 
       const now = new Date();
-      const billsWithRound = bills.map(bill => {
+      const billsWithRound = bills.map((bill) => {
         let roundDueDates = [];
         let roundStatus = [];
         if (
@@ -296,7 +296,7 @@ router.get(
             roundStatus.push({
               round: i + 1,
               dueDate: roundDue,
-              isDue: now >= roundDue
+              isDue: now >= roundDue,
             });
           }
         }
@@ -311,54 +311,64 @@ router.get(
           creator: bill.creator,
           paymentType: bill.paymentType,
           roundDetails: bill.roundDetails,
-          items: bill.items.map(item => ({
+          items: bill.items.map((item) => ({
             _id: item._id,
             description: item.description,
             amount: item.amount,
-            sharedWith: item.sharedWith.map(share => ({
-              user: share.user && typeof share.user === "object"
-                ? {
-                    _id: share.user._id,
-                    name: share.user.name,
-                    email: share.user.email
-                  }
-                : share.user,
+            sharedWith: item.sharedWith.map((share) => ({
+              user:
+                share.user && typeof share.user === "object"
+                  ? {
+                      _id: share.user._id,
+                      name: share.user.name,
+                      email: share.user.email,
+                    }
+                  : share.user,
               name: share.name,
               status: share.status,
               shareAmount: share.shareAmount,
               // filter เฉพาะรอบที่ <= currentRound เท่านั้น
               roundPayments: (share.roundPayments || []).filter(
-                p => p.round <= currentRound
+                (p) => p.round <= currentRound
               ),
-              eSlip: share.eSlip ? {
-                url: share.eSlip,
-                path: new URL(share.eSlip).pathname
-              } : null
-            }))
+              eSlip: share.eSlip
+                ? {
+                    url: share.eSlip,
+                    path: new URL(share.eSlip).pathname,
+                  }
+                : null,
+            })),
           })),
           note: bill.note,
           status: bill.status,
-          eSlip: bill.eSlip ? {
-            url: bill.eSlip,
-            path: new URL(bill.eSlip).pathname
-          } : null,
+          eSlip: bill.eSlip
+            ? {
+                url: bill.eSlip,
+                path: new URL(bill.eSlip).pathname,
+              }
+            : null,
           createdAt: bill.createdAt,
           updatedAt: bill.updatedAt,
           statusInfo: {
             status: bill.status,
-            isModifiable: !['canceled', 'paid'].includes(bill.status),
+            isModifiable: !["canceled", "paid"].includes(bill.status),
             canceledAt: bill.canceledAt,
             canceledBy: bill.canceledBy,
-            paidAt: bill.status === 'paid' ? bill.updatedAt : null
+            paidAt: bill.status === "paid" ? bill.updatedAt : null,
           },
-          roundInfo: bill.paymentType === 'round' ? {
-            currentRound: bill.roundDetails?.currentRound,
-            totalPeriod: bill.roundDetails?.totalPeriod,
-            dueDate: bill.roundDetails?.dueDate,
-            isLastRound: bill.roundDetails?.currentRound === bill.roundDetails?.totalPeriod
-          } : null,
+          roundInfo:
+            bill.paymentType === "round"
+              ? {
+                  currentRound: bill.roundDetails?.currentRound,
+                  totalPeriod: bill.roundDetails?.totalPeriod,
+                  dueDate: bill.roundDetails?.dueDate,
+                  isLastRound:
+                    bill.roundDetails?.currentRound ===
+                    bill.roundDetails?.totalPeriod,
+                }
+              : null,
           roundDueDates,
-          roundStatus
+          roundStatus,
         };
       });
 
@@ -366,7 +376,7 @@ router.get(
         success: true,
         message: "Bills retrieved successfully",
         data: billsWithRound,
-        count: billsWithRound.length
+        count: billsWithRound.length,
       });
     } catch (err) {
       console.error(`Error in ${req.method} ${req.originalUrl}:`, {
@@ -390,7 +400,7 @@ router.get(
  */
 router.get(
   "/my-bills",
-  [authenticateToken, validateUserId, checkWorkspaceAccessMiddleware],
+  [authenticateToken, validateUserId, checkWorkspaceBillAccess],
   async (req, res) => {
     try {
       const userId = getUserId(req.user);
@@ -402,22 +412,24 @@ router.get(
         workspace: req.workspaceId,
         $or: [
           { "creator.userId": userId },
-          { "items.sharedWith.user": userId }
-        ]
+          { "items.sharedWith.user": userId },
+        ],
       })
-      .populate("workspace")
-      .populate("creator.userId", "name email")
-      .populate("items.sharedWith.user", "name email");
+        .populate("workspace")
+        .populate("creator.userId", "name email")
+        .populate("items.sharedWith.user", "name email");
 
       const now = new Date();
-      const myBills = bills.map(bill => {
+      const myBills = bills.map((bill) => {
         let roundDueDates = [];
         let roundStatus = [];
 
         // คำนวณข้อมูลสำหรับการผ่อนชำระ
-        if (bill.paymentType === "round" && 
-            bill.roundDetails?.dueDate && 
-            bill.roundDetails?.totalPeriod) {
+        if (
+          bill.paymentType === "round" &&
+          bill.roundDetails?.dueDate &&
+          bill.roundDetails?.totalPeriod
+        ) {
           const dueDate = new Date(bill.roundDetails.dueDate);
           for (let i = 0; i < bill.roundDetails.totalPeriod; i++) {
             const roundDue = new Date(dueDate);
@@ -426,7 +438,7 @@ router.get(
             roundStatus.push({
               round: i + 1,
               dueDate: roundDue,
-              isDue: now >= roundDue
+              isDue: now >= roundDue,
             });
           }
         }
@@ -440,40 +452,45 @@ router.get(
           creator: bill.creator,
           paymentType: bill.paymentType,
           roundDetails: bill.roundDetails,
-          items: bill.items.map(item => ({
+          items: bill.items.map((item) => ({
             _id: item._id,
             description: item.description,
             amount: item.amount,
-            sharedWith: item.sharedWith.map(share => ({
+            sharedWith: item.sharedWith.map((share) => ({
               user: share.user,
               name: share.name,
               status: share.status,
               shareAmount: share.shareAmount,
-              roundPayments: (share.roundPayments || [])
-                .filter(p => p.round <= currentRound),
-              eSlip: share.eSlip ? {
-                url: share.eSlip,
-                path: new URL(share.eSlip).pathname
-              } : null
-            }))
+              roundPayments: (share.roundPayments || []).filter(
+                (p) => p.round <= currentRound
+              ),
+              eSlip: share.eSlip
+                ? {
+                    url: share.eSlip,
+                    path: new URL(share.eSlip).pathname,
+                  }
+                : null,
+            })),
           })),
           note: bill.note,
           status: bill.status,
-          eSlip: bill.eSlip ? {
-            url: bill.eSlip,
-            path: new URL(bill.eSlip).pathname
-          } : null,
+          eSlip: bill.eSlip
+            ? {
+                url: bill.eSlip,
+                path: new URL(bill.eSlip).pathname,
+              }
+            : null,
           createdAt: bill.createdAt,
           updatedAt: bill.updatedAt,
           roundDueDates,
           roundStatus,
           statusInfo: {
             status: bill.status,
-            isModifiable: !['canceled', 'paid'].includes(bill.status),
+            isModifiable: !["canceled", "paid"].includes(bill.status),
             canceledAt: bill.canceledAt,
             canceledBy: bill.canceledBy,
-            paidAt: bill.status === 'paid' ? bill.updatedAt : null
-          }
+            paidAt: bill.status === "paid" ? bill.updatedAt : null,
+          },
         };
       });
 
@@ -481,20 +498,19 @@ router.get(
         success: true,
         message: "My bills retrieved successfully",
         data: myBills,
-        count: myBills.length
+        count: myBills.length,
       });
-
     } catch (err) {
       console.error(`Error in get my bills:`, {
         error: err.message,
         stack: err.stack,
         userId: req.userId,
-        workspace: req.workspaceId
+        workspace: req.workspaceId,
       });
       res.status(500).json({
         success: false,
         message: "Failed to fetch my bills",
-        error: err.message
+        error: err.message,
       });
     }
   }
@@ -503,21 +519,17 @@ router.get(
 // 2.1️⃣ ดึงข้อมูลบิลตาม ID
 router.get(
   "/:id",
-  [
-    authenticateToken,
-    validateUserId,
-    checkWorkspaceAccessMiddleware,
-  ],
+  [authenticateToken, validateUserId, checkWorkspaceBillAccess],
   async (req, res) => {
     const { id } = req.params;
     try {
-      const bill = await Bill.findOne({ 
+      const bill = await Bill.findOne({
         _id: id,
-        workspace: req.workspaceId 
+        workspace: req.workspaceId,
       })
-        .populate('workspace', 'name type owner budget')
-        .populate('creator.userId', 'name numberAccount')
-        .populate('items.sharedWith.user', 'name email')
+        .populate("workspace", "name type owner budget")
+        .populate("creator.userId", "name numberAccount")
+        .populate("items.sharedWith.user", "name email")
         .lean();
 
       if (!bill) {
@@ -544,7 +556,7 @@ router.get(
           roundStatus.push({
             round: i + 1,
             dueDate: roundDue,
-            isDue: now >= roundDue
+            isDue: now >= roundDue,
           });
         }
       }
@@ -556,78 +568,88 @@ router.get(
       const billDetails = {
         _id: bill._id,
         workspace: bill.workspace,
-        creator: bill.creator.map(c => ({
+        creator: bill.creator.map((c) => ({
           userId: c.userId._id,
           name: c.userId.name,
-          numberAccount: c.userId.numberAccount
+          numberAccount: c.userId.numberAccount,
         })),
         paymentType: bill.paymentType,
         roundDetails: bill.roundDetails,
-        items: bill.items.map(item => ({
+        items: bill.items.map((item) => ({
           _id: item._id,
           description: item.description,
           amount: item.amount,
-          sharedWith: item.sharedWith.map(share => ({
+          sharedWith: item.sharedWith.map((share) => ({
             user: {
               _id: share.user._id,
               name: share.user.name,
-              email: share.user.email
+              email: share.user.email,
             },
             name: share.name,
             status: share.status,
             shareAmount: share.shareAmount,
             // filter เฉพาะรอบที่ <= currentRound หรือยังไม่จ่าย
             roundPayments: (share.roundPayments || []).filter(
-              p => p.round <= currentRound || (p.status !== "paid" && p.round < currentRound)
+              (p) =>
+                p.round <= currentRound ||
+                (p.status !== "paid" && p.round < currentRound)
             ),
-            eSlip: share.eSlip ? {
-              url: share.eSlip,
-              path: new URL(share.eSlip).pathname
-            } : null
-          }))
+            eSlip: share.eSlip
+              ? {
+                  url: share.eSlip,
+                  path: new URL(share.eSlip).pathname,
+                }
+              : null,
+          })),
         })),
         note: bill.note,
         status: bill.status,
-        eSlip: bill.eSlip ? {
-          url: bill.eSlip,
-          path: new URL(bill.eSlip).pathname
-        } : null,
+        eSlip: bill.eSlip
+          ? {
+              url: bill.eSlip,
+              path: new URL(bill.eSlip).pathname,
+            }
+          : null,
         createdAt: bill.createdAt,
         updatedAt: bill.updatedAt,
         statusInfo: {
           status: bill.status,
-          isModifiable: !['canceled', 'paid'].includes(bill.status),
+          isModifiable: !["canceled", "paid"].includes(bill.status),
           canceledAt: bill.canceledAt,
           canceledBy: bill.canceledBy,
-          paidAt: bill.status === 'paid' ? bill.updatedAt : null
+          paidAt: bill.status === "paid" ? bill.updatedAt : null,
         },
-        roundInfo: bill.paymentType === 'round' ? {
-          currentRound: bill.roundDetails?.currentRound,
-          totalPeriod: bill.roundDetails?.totalPeriod,
-          dueDate: bill.roundDetails?.dueDate,
-          isLastRound: bill.roundDetails?.currentRound === bill.roundDetails?.totalPeriod
-        } : null,
+        roundInfo:
+          bill.paymentType === "round"
+            ? {
+                currentRound: bill.roundDetails?.currentRound,
+                totalPeriod: bill.roundDetails?.totalPeriod,
+                dueDate: bill.roundDetails?.dueDate,
+                isLastRound:
+                  bill.roundDetails?.currentRound ===
+                  bill.roundDetails?.totalPeriod,
+              }
+            : null,
         roundDueDates,
-        roundStatus
+        roundStatus,
       };
 
       res.status(200).json({
         success: true,
         message: "Bill retrieved successfully",
-        data: billDetails
+        data: billDetails,
       });
-
     } catch (err) {
       console.error(`Error in ${req.method} ${req.originalUrl}:`, {
         error: err.message,
         stack: err.stack,
         userId: req.userId,
-        billId: id
+        billId: id,
       });
       res.status(500).json({
         success: false,
         message: "Failed to fetch bill details",
-        error: err.message
+        error: err.message,
       });
     }
   }
@@ -643,58 +665,90 @@ router.put(
   [
     authenticateToken,
     validateUserId,
-    checkWorkspaceAccessMiddleware,
+    checkWorkspaceBillAccess, 
     checkBillStatus,
     checkBillCreator,
     upload.single("eSlip"),
   ],
   async (req, res) => {
     try {
+      const userId = getUserId(req.user);
       const bill = req.bill;
       const oldSlipUrl = bill.eSlip;
 
-      // Upload new slip if provided
+      console.log("Debug - Updating bill:", {
+        billId: bill._id,
+        userId,
+        workspace: bill.workspace,
+        hasFile: !!req.file,
+        oldSlipUrl
+      });
+
+      // Handle file upload if provided
       if (req.file) {
-        // ลบไฟล์เก่าถ้ามี
-        if (oldSlipUrl?.includes(AZURE_BLOB_DOMAIN)) {
-          try {
+        try {
+          // Extract original path from old URL if exists
+          let originalPath = null;
+          if (oldSlipUrl) {
+            const oldUrl = new URL(oldSlipUrl);
+            originalPath = oldUrl.pathname.split('/').slice(2).join('/');
+          }
+
+          // Use original path or create new path
+          const blobPath = originalPath || generateBillBlobPath("bill-create", {
+            userId,
+            workspaceId: bill.workspace,
+            originalname: req.file.originalname
+          });
+
+          // Delete old file first
+          if (oldSlipUrl?.includes(AZURE_BLOB_DOMAIN)) {
             await deleteFromAzureBlob(oldSlipUrl);
             console.log(`Deleted old bill slip: ${oldSlipUrl}`);
-          } catch (error) {
-            console.error("Error deleting old slip:", error);
           }
+
+          // Upload new file with same path
+          const newSlipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
+            userId: userId.toString(),
+            workspaceId: bill.workspace.toString(),
+            type: "bill-update",
+            contentType: req.file.mimetype
+          });
+
+          bill.eSlip = newSlipUrl;
+          console.log("File updated with same path:", {
+            oldPath: originalPath,
+            newPath: blobPath
+          });
+        } catch (uploadError) {
+          console.error("Error handling file update:", uploadError);
+          return res.status(500).json({
+            success: false,
+            message: "Failed to update bill slip",
+            error: uploadError.message
+          });
         }
-
-        // อัพโหลดไฟล์ใหม่ใน path เดิม
-        const blobPath = generateBillBlobPath("bill-main", {
-          userId: req.userId,
-          workspaceId: bill.workspace,
-          billId: bill._id,
-          originalname: req.file.originalname,
-        });
-
-        const newSlipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
-          userId: req.userId.toString(),
-          billId: bill._id.toString(),
-          type: "bill-main",
-        });
-
-        bill.eSlip = newSlipUrl;
       }
 
-      // อัพเดทข้อมูลอื่นๆ ของบิล
+      // Update basic bill info
       if (req.body.note !== undefined) bill.note = req.body.note;
-      if (req.body.status !== undefined) bill.status = req.body.status;
+      if (req.body.paymentType !== undefined) bill.paymentType = req.body.paymentType;
 
-      // อัพเดทรายการ items ถ้ามี
-      if (req.body.items?.length > 0) {
+      // Update items if provided
+      if (req.body.items && Array.isArray(req.body.items)) {
         for (const updatedItem of req.body.items) {
+          // Make sure item has an _id
+          if (!updatedItem._id) {
+            console.warn("Item without _id found:", updatedItem);
+            continue;
+          }
+
           const itemIndex = bill.items.findIndex(
             item => item._id.toString() === updatedItem._id.toString()
           );
 
           if (itemIndex !== -1) {
-            // อัพเดทข้อมูล item
+            // Update item fields
             if (updatedItem.description) {
               bill.items[itemIndex].description = updatedItem.description;
             }
@@ -702,11 +756,18 @@ router.put(
               bill.items[itemIndex].amount = parseFloat(updatedItem.amount);
             }
 
-            // อัพเดท sharedWith ถ้ามี
-            if (updatedItem.sharedWith?.length > 0) {
+            // Update shared users if provided
+            if (Array.isArray(updatedItem.sharedWith)) {
               for (const updatedShare of updatedItem.sharedWith) {
+                // Make sure share has user id
+                if (!updatedShare.user) {
+                  console.warn("Share without user found:", updatedShare);
+                  continue;
+                }
+
                 const shareIndex = bill.items[itemIndex].sharedWith.findIndex(
-                  share => share.user.toString() === updatedShare.user.toString()
+                  share => share.user && 
+                  share.user.toString() === updatedShare.user.toString()
                 );
 
                 if (shareIndex !== -1) {
@@ -721,21 +782,42 @@ router.put(
         }
       }
 
+      // Update timestamps
       bill.updatedAt = new Date();
       await bill.save();
 
+      // Send response with formatted data
       res.json({
         success: true,
         message: "Bill updated successfully",
-        data: bill
+        data: {
+          ...bill.toObject(),
+          eSlip: bill.eSlip ? {
+            url: bill.eSlip,
+            path: new URL(bill.eSlip).pathname
+          } : null,
+          items: bill.items.map(item => ({
+            ...item.toObject(),
+            sharedWith: item.sharedWith.map(share => ({
+              ...share.toObject(),
+              eSlip: share.eSlip ? {
+                url: share.eSlip,
+                path: new URL(share.eSlip).pathname
+              } : null
+            }))
+          }))
+        }
       });
 
     } catch (err) {
       console.error("Error updating bill:", {
         error: err.message,
         stack: err.stack,
-        billId: req.params.id
+        billId: req.params.id,
+        userId: getUserId(req.user),
+        body: req.body
       });
+      
       res.status(500).json({
         success: false,
         message: "Failed to update bill",
@@ -755,22 +837,22 @@ router.delete(
   [
     authenticateToken,
     validateUserId,
-    checkWorkspaceAccessMiddleware,
+    checkWorkspaceBillAccess,
     checkBillCreator,
   ],
   async (req, res) => {
     const { id } = req.params;
     try {
-      const bill = await Bill.findOne({ 
+      const bill = await Bill.findOne({
         _id: id,
         workspace: req.workspaceId,
-        'creator.userId': req.userId
+        "creator.userId": req.userId,
       });
 
       if (!bill) {
         return res.status(404).json({
           success: false,
-          message: "Bill not found or you don't have permission to delete it"
+          message: "Bill not found or you don't have permission to delete it",
         });
       }
 
@@ -780,8 +862,8 @@ router.delete(
 
       // Delete main bill slip using deleteFileFromAzure
       const mainFileResult = await deleteFileFromAzure(bill.eSlip, {
-        type: 'main',
-        billId: bill._id
+        type: "main",
+        billId: bill._id,
       });
       if (mainFileResult) {
         if (mainFileResult.success) {
@@ -795,9 +877,9 @@ router.delete(
       for (const item of bill.items) {
         for (const share of item.sharedWith) {
           const paymentFileResult = await deleteFileFromAzure(share.eSlip, {
-            type: 'payment',
+            type: "payment",
             userId: share.user,
-            itemId: item._id
+            itemId: item._id,
           });
           if (paymentFileResult) {
             if (paymentFileResult.success) {
@@ -823,22 +905,21 @@ router.delete(
             success: deletedFiles,
             failed: failedFiles,
             totalDeleted: deletedFiles.length,
-            totalFailed: failedFiles.length
-          }
-        }
+            totalFailed: failedFiles.length,
+          },
+        },
       });
-
     } catch (err) {
       console.error(`Error in delete bill:`, {
         error: err.message,
         stack: err.stack,
         userId: req.userId,
-        billId: id
+        billId: id,
       });
       res.status(500).json({
         success: false,
         message: "Failed to delete bill",
-        error: err.message
+        error: err.message,
       });
     }
   }
@@ -854,7 +935,7 @@ router.post(
   [
     authenticateToken,
     validateUserId,
-    checkWorkspaceAccessMiddleware,
+    checkWorkspaceBillAccess,
     checkBillStatus,
     upload.single("eSlip"),
     validatePayment,
@@ -870,43 +951,43 @@ router.post(
       if (!req.file) {
         return res.status(400).json({
           success: false,
-          message: "Payment slip is required"
+          message: "Payment slip is required",
         });
       }
 
       // หา item ในบิล
-      const item = bill.items.find(item => item._id.toString() === itemId);
+      const item = bill.items.find((item) => item._id.toString() === itemId);
       if (!item) {
         return res.status(404).json({
           success: false,
-          message: "Item not found in this bill"
+          message: "Item not found in this bill",
         });
       }
 
       // หาข้อมูลการแชร์ของผู้ใช้
       const userShare = item.sharedWith.find(
-        share => share.user.toString() === req.userId.toString()
+        (share) => share.user.toString() === req.userId.toString()
       );
       if (!userShare) {
         return res.status(404).json({
           success: false,
-          message: "User not found in shared list"
+          message: "User not found in shared list",
         });
       }
 
       // เช็คว่าเป็นบิลแบบ round หรือไม่
       if (bill.paymentType === "round") {
         const currentRound = bill.roundDetails.currentRound;
-        
+
         // หา roundPayment ของรอบปัจจุบัน
         const currentRoundPayment = userShare.roundPayments.find(
-          p => p.round === currentRound
+          (p) => p.round === currentRound
         );
 
         if (!currentRoundPayment) {
           return res.status(400).json({
             success: false,
-            message: `Round payment #${currentRound} not found`
+            message: `Round payment #${currentRound} not found`,
           });
         }
 
@@ -914,7 +995,7 @@ router.post(
         if (currentRoundPayment.status === "paid") {
           return res.status(400).json({
             success: false,
-            message: `Round #${currentRound} is already paid`
+            message: `Round #${currentRound} is already paid`,
           });
         }
 
@@ -924,7 +1005,7 @@ router.post(
           billId: bill._id,
           itemId: itemId,
           round: currentRound,
-          originalname: req.file.originalname
+          originalname: req.file.originalname,
         });
 
         // อัพโหลดสลิป
@@ -933,20 +1014,19 @@ router.post(
           billId: bill._id.toString(),
           itemId: itemId,
           round: currentRound,
-          type: "round-payment-slip"
+          type: "round-payment-slip",
         });
 
         // อัพเดตสถานะและ URL สลิปของรอบปัจจุบัน
         currentRoundPayment.status = "awaiting_confirmation";
         currentRoundPayment.eSlip = slipUrl;
-
       } else {
         // กรณีบิลปกติ
         // เช็คสถานะการจ่ายเงิน
         if (userShare.status === "paid") {
           return res.status(400).json({
             success: false,
-            message: "This share is already paid"
+            message: "This share is already paid",
           });
         }
 
@@ -955,7 +1035,7 @@ router.post(
           userId: req.userId,
           billId: bill._id,
           itemId: itemId,
-          originalname: req.file.originalname
+          originalname: req.file.originalname,
         });
 
         // อัพโหลดสลิป
@@ -963,7 +1043,7 @@ router.post(
           userId: req.userId.toString(),
           billId: bill._id.toString(),
           itemId: itemId,
-          type: "payment-slip"
+          type: "payment-slip",
         });
 
         // อัพเดตสถานะและ URL สลิป
@@ -976,9 +1056,8 @@ router.post(
       res.json({
         success: true,
         message: "Payment evidence submitted successfully",
-        data: bill
+        data: bill,
       });
-
     } catch (err) {
       console.error(`Error in payment submission:`, {
         error: err.message,
@@ -986,12 +1065,12 @@ router.post(
         userId: req.userId,
         billId: id,
         itemId: itemId,
-        file: req.file
+        file: req.file,
       });
       res.status(500).json({
         success: false,
         message: "Failed to submit payment",
-        error: err.message
+        error: err.message,
       });
     }
   }
@@ -1007,7 +1086,7 @@ router.patch(
   [
     authenticateToken,
     validateUserId,
-    checkWorkspaceAccessMiddleware,
+    checkWorkspaceBillAccess,
     checkBillStatus,
     checkBillCreator,
     upload.none(),
@@ -1020,37 +1099,40 @@ router.patch(
       const { itemId, userIdToConfirm } = req.body;
 
       // Find item and user share
-      const item = bill.items.find(item => item._id.toString() === itemId);
+      const item = bill.items.find((item) => item._id.toString() === itemId);
       if (!item) {
         return res.status(404).json({
           success: false,
-          message: "Item not found in this bill"
+          message: "Item not found in this bill",
         });
       }
 
       const userShare = item.sharedWith.find(
-        share => share.user.toString() === userIdToConfirm
+        (share) => share.user.toString() === userIdToConfirm
       );
       if (!userShare) {
         return res.status(404).json({
           success: false,
-          message: "User not found in shared list"
+          message: "User not found in shared list",
         });
       }
 
       // เช็คว่าเป็นบิลแบบ round หรือไม่
       if (bill.paymentType === "round") {
         const currentRound = bill.roundDetails.currentRound;
-        
+
         // หา roundPayment ของรอบปัจจุบัน
         const currentRoundPayment = userShare.roundPayments.find(
-          p => p.round === currentRound
+          (p) => p.round === currentRound
         );
 
-        if (!currentRoundPayment || currentRoundPayment.status !== "awaiting_confirmation") {
+        if (
+          !currentRoundPayment ||
+          currentRoundPayment.status !== "awaiting_confirmation"
+        ) {
           return res.status(400).json({
             success: false,
-            message: "Payment is not awaiting confirmation for current round"
+            message: "Payment is not awaiting confirmation for current round",
           });
         }
 
@@ -1058,9 +1140,11 @@ router.patch(
         currentRoundPayment.status = "paid";
 
         // เช็คว่าทุกคนจ่ายรอบปัจจุบันครบหรือยัง
-        const allPaidCurrentRound = bill.items.every(item =>
-          item.sharedWith.every(share =>
-            share.roundPayments.find(p => p.round === currentRound)?.status === "paid"
+        const allPaidCurrentRound = bill.items.every((item) =>
+          item.sharedWith.every(
+            (share) =>
+              share.roundPayments.find((p) => p.round === currentRound)
+                ?.status === "paid"
           )
         );
 
@@ -1071,12 +1155,12 @@ router.patch(
           } else {
             // เลื่อนไปรอบถัดไป
             bill.roundDetails.currentRound++;
-            
+
             // เตรียมรอบถัดไปสำหรับทุกคน
-            bill.items.forEach(item => {
-              item.sharedWith.forEach(share => {
+            bill.items.forEach((item) => {
+              item.sharedWith.forEach((share) => {
                 const nextRoundPayment = share.roundPayments.find(
-                  p => p.round === currentRound + 1
+                  (p) => p.round === currentRound + 1
                 );
                 if (nextRoundPayment) {
                   nextRoundPayment.status = "pending";
@@ -1100,26 +1184,25 @@ router.patch(
             id: bill._id,
             itemId: itemId,
             userId: userIdToConfirm,
-            round: currentRound
-          }
+            round: currentRound,
+          },
         });
 
         await Promise.all([bill.save(), transaction.save()]);
-
       } else {
         // สำหรับบิลปกติ
         if (userShare.status !== "awaiting_confirmation") {
           return res.status(400).json({
             success: false,
-            message: "Payment is not awaiting confirmation"
+            message: "Payment is not awaiting confirmation",
           });
         }
 
         userShare.status = "paid";
 
         // เช็คว่าทุกคนจ่ายครบหรือยัง
-        const allPaid = bill.items.every(item =>
-          item.sharedWith.every(share => share.status === "paid")
+        const allPaid = bill.items.every((item) =>
+          item.sharedWith.every((share) => share.status === "paid")
         );
 
         if (allPaid) {
@@ -1139,8 +1222,8 @@ router.patch(
             type: "Bill",
             id: bill._id,
             itemId: itemId,
-            userId: userIdToConfirm
-          }
+            userId: userIdToConfirm,
+          },
         });
 
         await Promise.all([bill.save(), transaction.save()]);
@@ -1149,9 +1232,8 @@ router.patch(
       res.json({
         success: true,
         message: "Payment confirmed successfully",
-        data: bill
+        data: bill,
       });
-
     } catch (err) {
       console.error("Error in confirm payment:", {
         error: err.message,
@@ -1162,7 +1244,7 @@ router.patch(
       res.status(500).json({
         success: false,
         message: "Failed to confirm payment",
-        error: err.message
+        error: err.message,
       });
     }
   }
@@ -1178,7 +1260,7 @@ router.patch(
   [
     authenticateToken,
     validateUserId,
-    checkWorkspaceAccessMiddleware,
+    checkWorkspaceBillAccess,
     checkBillStatus,
     checkBillCreator,
     upload.none(),
@@ -1196,7 +1278,7 @@ router.patch(
       if (bill.status === "canceled") {
         return res.status(400).json({
           success: false,
-          message: "Bill is already canceled"
+          message: "Bill is already canceled",
         });
       }
 
@@ -1206,8 +1288,8 @@ router.patch(
 
       // ลบไฟล์หลักของบิล
       const mainFileResult = await deleteFileFromAzure(bill.eSlip, {
-        type: 'main',
-        billId: bill._id
+        type: "main",
+        billId: bill._id,
       });
       if (mainFileResult) {
         if (mainFileResult.success) {
@@ -1221,9 +1303,9 @@ router.patch(
       for (const item of bill.items) {
         for (const share of item.sharedWith) {
           const paymentFileResult = await deleteFileFromAzure(share.eSlip, {
-            type: 'payment',
+            type: "payment",
             userId: share.user,
-            itemId: item._id
+            itemId: item._id,
           });
           if (paymentFileResult) {
             if (paymentFileResult.success) {
@@ -1246,7 +1328,7 @@ router.patch(
             canceledBy: req.userId,
             updatedAt: new Date(),
             eSlip: null, // เพิ่มการ set null หลังจากลบไฟล์
-            "items.$[].sharedWith.$[].eSlip": null
+            "items.$[].sharedWith.$[].eSlip": null,
           },
         },
         { new: true, runValidators: true }
@@ -1255,7 +1337,7 @@ router.patch(
       if (!updatedBill) {
         return res.status(404).json({
           success: false,
-          message: "Bill not found"
+          message: "Bill not found",
         });
       }
 
@@ -1270,11 +1352,10 @@ router.patch(
             success: deletedFiles,
             failed: failedFiles,
             totalDeleted: deletedFiles.length,
-            totalFailed: failedFiles.length
-          }
-        }
+            totalFailed: failedFiles.length,
+          },
+        },
       });
-
     } catch (err) {
       console.error("Error in cancel bill:", {
         error: err.message,
@@ -1284,7 +1365,7 @@ router.patch(
       res.status(500).json({
         success: false,
         message: "Failed to cancel bill",
-        error: err.message
+        error: err.message,
       });
     }
   }
@@ -1299,7 +1380,7 @@ router.patch(
   [
     authenticateToken,
     validateUserId,
-    checkWorkspaceAccessMiddleware,
+    checkWorkspaceBillAccess,
     checkBillStatus,
     checkBillCreator,
     upload.none(), // <<== เพิ่มบรรทัดนี้
@@ -1310,11 +1391,15 @@ router.patch(
       const bill = req.bill;
 
       // DEBUG: log body
-      console.log('PATCH /:id/round req.body:', req.body);
+      console.log("PATCH /:id/round req.body:", req.body);
       // แปลงค่าจาก form-data ให้เป็นตัวเลข
       const dueDate = req.body.dueDate;
-      const totalPeriod = req.body.totalPeriod ? Number(req.body.totalPeriod) : undefined;
-      const currentRound = req.body.currentRound ? Number(req.body.currentRound) : undefined;
+      const totalPeriod = req.body.totalPeriod
+        ? Number(req.body.totalPeriod)
+        : undefined;
+      const currentRound = req.body.currentRound
+        ? Number(req.body.currentRound)
+        : undefined;
 
       if (bill.paymentType !== "round") {
         return res.status(400).json({
@@ -1324,7 +1409,7 @@ router.patch(
       }
 
       // DEBUG: log ก่อนแก้ไข
-      console.log('ก่อน:', bill.roundDetails);
+      console.log("ก่อน:", bill.roundDetails);
 
       if (dueDate) {
         bill.roundDetails.dueDate = new Date(dueDate);
@@ -1390,7 +1475,7 @@ router.patch(
       await bill.save();
 
       // DEBUG: log หลัง save
-      console.log('หลัง:', bill.roundDetails);
+      console.log("หลัง:", bill.roundDetails);
 
       // โหลดข้อมูลใหม่หลัง save
       const updatedBill = await Bill.findById(id);
@@ -1405,7 +1490,8 @@ router.patch(
             totalPeriod: updatedBill.roundDetails.totalPeriod,
             dueDate: updatedBill.roundDetails.dueDate,
             isLastRound:
-              updatedBill.roundDetails.currentRound === updatedBill.roundDetails.totalPeriod,
+              updatedBill.roundDetails.currentRound ===
+              updatedBill.roundDetails.totalPeriod,
           },
         },
       });

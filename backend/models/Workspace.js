@@ -13,6 +13,11 @@ const workspaceSchema = new mongoose.Schema({
   type: {
     type: String,
     required: true,
+    enum: {
+      values: ["expense", "project"],
+      message: "Type must be either expense or project",
+    },
+    default: "expense",
   },
   budget: {
     type: Number,

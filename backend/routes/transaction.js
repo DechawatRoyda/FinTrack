@@ -5,6 +5,22 @@ import multer from "multer";
 import { uploadToAzureBlob } from "../utils/azureStorage.js";
 import { deleteFromAzureBlob } from "../utils/azureStorage.js";
 import { checkTransactionOwner } from "../middleware/transactionAuth.js";
+import crypto from 'crypto';
+
+// Add helper function here
+const generateTransactionPath = (userId, workspaceId, filename) => {
+  const basePath = workspaceId 
+    ? `transactions/${workspaceId}/${userId}`
+    : `transactions/user/${userId}`;
+    
+  // สร้าง hash จากข้อมูลไฟล์
+  const fileHash = crypto.createHash('md5')
+    .update(filename)
+    .digest('hex')
+    .substring(0, 8);
+    
+  return `${basePath}/${fileHash}-${filename}`;
+};
 
 const router = express.Router();
 const storage = multer.memoryStorage();
@@ -23,13 +39,14 @@ router.post(
 
       const { workspace, type, amount, category, description } = req.body;
 
+      const workspaceId = workspace && workspace.trim() !== "" ? workspace : null;
+
       // Validate required fields
-      if (!workspace || !type || !amount || !category || !req.file) {
+      if (!type || !amount || !category || !req.file) {
         return res.status(400).json({
           success: false,
           message: "Missing required fields",
           missing: {
-            workspace: !workspace,
             type: !type,
             amount: !amount,
             category: !category,
@@ -47,15 +64,18 @@ router.post(
         });
       }
 
-      // Upload file to Azure Blob
+      // Upload file to Azure Blob using helper function
       let blobUrl;
       try {
-        const uniqueFilename = `transactions/${workspace}/${Date.now()}-${
+        const uniqueFilename = generateTransactionPath(
+          req.user.id,
+          workspaceId,
           req.file.originalname
-        }`;
+        );
+
         blobUrl = await uploadToAzureBlob(req.file.buffer, uniqueFilename, {
           userId: req.user.id,
-          workspaceId: workspace,
+          workspaceId: workspaceId,
           type: "transaction-slip",
           contentType: req.file.mimetype,
         });
@@ -71,7 +91,7 @@ router.post(
       // Create transaction
       const transaction = new Transaction({
         user: req.user.id,
-        workspace,
+        workspace: workspaceId,
         type,
         amount: numAmount,
         category,
@@ -81,13 +101,28 @@ router.post(
         transaction_time: new Date().toLocaleTimeString(),
       });
 
-      await transaction.save();
+      try {
+        await transaction.save();
+        res.status(201).json({
+          success: true,
+          message: "Transaction created successfully",
+          data: transaction,
+        });
+      } catch (saveError) {
+        // Handle validation errors
+        if (saveError.name === 'ValidationError') {
+          return res.status(400).json({
+            success: false,
+            message: "Validation failed",
+            errors: Object.keys(saveError.errors).reduce((acc, key) => {
+              acc[key] = saveError.errors[key].message;
+              return acc;
+            }, {})
+          });
+        }
+        throw saveError;
+      }
 
-      res.status(201).json({
-        success: true,
-        message: "Transaction created successfully",
-        data: transaction,
-      });
     } catch (error) {
       console.error("Transaction creation error:", error);
       res.status(500).json({
@@ -173,89 +208,157 @@ router.get("/CheckBills", authenticateToken, async (req, res) => {
   }
 });
 
-router.get("/CheckBills/:id", [
-  authenticateToken,
-  checkTransactionOwner
-], async (req, res) => {
-  try {
-    // ใช้ transaction ที่ได้จาก middleware
-    const transaction = await req.transaction.populate("workspace");
+router.get(
+  "/CheckBills/:id",
+  [authenticateToken, checkTransactionOwner],
+  async (req, res) => {
+    try {
+      // ใช้ transaction ที่ได้จาก middleware
+      const transaction = await req.transaction.populate("workspace");
 
-    // แปลงข้อมูลให้มี image path
-    const transformedTransaction = {
-      _id: transaction._id,
-      type: transaction.type,
-      amount: transaction.amount,
-      category: transaction.category,
-      description: transaction.description,
-      transaction_date: transaction.transaction_date,
-      transaction_time: transaction.transaction_time,
-      workspace: transaction.workspace ? {
-        _id: transaction.workspace._id,
-        name: transaction.workspace.name,
-      } : null,
-      image: {
-        url: transaction.slip_image,
-        path: transaction.slip_image ? new URL(transaction.slip_image).pathname : null,
-      }
-    };
+      // แปลงข้อมูลให้มี image path
+      const transformedTransaction = {
+        _id: transaction._id,
+        type: transaction.type,
+        amount: transaction.amount,
+        category: transaction.category,
+        description: transaction.description,
+        transaction_date: transaction.transaction_date,
+        transaction_time: transaction.transaction_time,
+        workspace: transaction.workspace
+          ? {
+              _id: transaction.workspace._id,
+              name: transaction.workspace.name,
+            }
+          : null,
+        image: {
+          url: transaction.slip_image,
+          path: transaction.slip_image
+            ? new URL(transaction.slip_image).pathname
+            : null,
+        },
+      };
 
-    res.json({
-      success: true,
-      data: transformedTransaction
-    });
-
-  } catch (error) {
-    console.error("Error fetching transaction:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch transaction",
-      error: error.message
-    });
+      res.json({
+        success: true,
+        data: transformedTransaction,
+      });
+    } catch (error) {
+      console.error("Error fetching transaction:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch transaction",
+        error: error.message,
+      });
+    }
   }
-});
+);
 
 // 📌 อัปเดต Transaction ตาม ID
 router.put(
   "/CheckBills/:id",
-  [
-    authenticateToken,
-    checkTransactionOwner,
-    upload.single("slip_image")
-  ],
+  [authenticateToken, checkTransactionOwner, upload.single("slip_image")],
   async (req, res) => {
     try {
-      const transaction = req.transaction; // ใช้จาก middleware
+      const transaction = req.transaction;
       const { type, amount, category, description } = req.body;
+
+      // Validate amount if provided
+      if (amount) {
+        const numAmount = parseFloat(amount);
+        if (isNaN(numAmount)) {
+          return res.status(400).json({
+            success: false,
+            message: "Amount must be a number"
+          });
+        }
+        transaction.amount = numAmount;
+      }
 
       // If new image is uploaded
       if (req.file) {
-        const uniqueFilename = `transactions/${transaction.workspace}/${Date.now()}-${req.file.originalname}`;
-        const blobUrl = await uploadToAzureBlob(
-          req.file.buffer,
-          uniqueFilename,
-          {
-            userId: req.user.id,
-            transactionId: transaction._id.toString(),
-            type: "transaction-slip-update"
+        try {
+          // 1. ลบไฟล์เก่าก่อน (ถ้ามี)
+          if (transaction.slip_image?.includes("blob.core.windows.net")) {
+            try {
+              await deleteFromAzureBlob(transaction.slip_image);
+              console.log("Old file deleted successfully");
+            } catch (deleteError) {
+              console.error("Error deleting old file:", deleteError);
+              // ไม่ return error เพราะยังต้องการให้อัพโหลดไฟล์ใหม่ต่อไป
+            }
           }
-        );
-        transaction.slip_image = blobUrl;
+
+          // 2. สร้าง path ใหม่
+          const uniqueFilename = generateTransactionPath(
+            req.user.id,
+            transaction.workspace,
+            req.file.originalname
+          );
+
+          // 3. อัพโหลดไฟล์ใหม่
+          const blobUrl = await uploadToAzureBlob(
+            req.file.buffer,
+            uniqueFilename,
+            {
+              userId: req.user.id,
+              workspaceId: transaction.workspace,
+              type: "transaction-slip",
+              contentType: req.file.mimetype,
+            }
+          );
+
+          transaction.slip_image = blobUrl;
+        } catch (uploadError) {
+          console.error("File upload error:", uploadError);
+          return res.status(500).json({
+            success: false,
+            message: "Failed to update slip image",
+            error: uploadError.message
+          });
+        }
       }
 
-      // อัพเดทข้อมูล
+      // อัพเดทข้อมูลอื่นๆ
       if (type) transaction.type = type;
-      if (amount) transaction.amount = parseFloat(amount);
       if (category) transaction.category = category;
-      if (description) transaction.description = description;
+      if (description !== undefined) transaction.description = description;
 
-      await transaction.save();
+      try {
+        await transaction.save();
+        
+        // ส่งข้อมูลกลับในรูปแบบเดียวกับ GET
+        const transformedTransaction = {
+          _id: transaction._id,
+          type: transaction.type,
+          amount: transaction.amount,
+          category: transaction.category,
+          description: transaction.description,
+          transaction_date: transaction.transaction_date,
+          transaction_time: transaction.transaction_time,
+          workspace: transaction.workspace
+            ? {
+                _id: transaction.workspace._id,
+                name: transaction.workspace.name,
+              }
+            : null,
+          image: {
+            url: transaction.slip_image,
+            path: transaction.slip_image
+              ? new URL(transaction.slip_image).pathname
+              : null,
+          },
+        };
 
-      res.json({
-        success: true,
-        message: "Transaction updated successfully",
-        data: transaction
-      });
+        res.json({
+          success: true,
+          message: "Transaction updated successfully",
+          data: transformedTransaction
+        });
+      } catch (saveError) {
+        // ...existing validation error handling...
+      }
+
     } catch (error) {
       console.error("Error updating transaction:", error);
       res.status(500).json({
@@ -270,16 +373,13 @@ router.put(
 // 📌 ลบ Transaction ตาม ID
 router.delete(
   "/CheckBills/:id",
-  [
-    authenticateToken,
-    checkTransactionOwner
-  ],
+  [authenticateToken, checkTransactionOwner],
   async (req, res) => {
     try {
       const transaction = req.transaction; // ใช้จาก middleware
 
       // ลบไฟล์จาก Azure Blob ก่อน
-      if (transaction.slip_image?.includes('blob.core.windows.net')) {
+      if (transaction.slip_image?.includes("blob.core.windows.net")) {
         try {
           await deleteFromAzureBlob(transaction.slip_image);
         } catch (error) {
@@ -289,17 +389,17 @@ router.delete(
 
       // ลบ transaction จาก MongoDB
       await transaction.deleteOne();
-    
-      res.json({ 
+
+      res.json({
         success: true,
-        message: "Transaction and associated files deleted successfully" 
+        message: "Transaction and associated files deleted successfully",
       });
     } catch (error) {
       console.error("Delete transaction error:", error);
-      res.status(500).json({ 
+      res.status(500).json({
         success: false,
         message: "Failed to delete transaction",
-        error: error.message
+        error: error.message,
       });
     }
   }

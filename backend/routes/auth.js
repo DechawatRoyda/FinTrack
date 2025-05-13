@@ -13,6 +13,9 @@ import {
   validatePasswordStrength,
   validateUsername,
 } from "../middleware/validation.js";
+import { uploadToAzureBlob, deleteFromAzureBlob } from "../utils/azureStorage.js"
+
+// Multer config for file uploads
 // import rateLimit from 'express-rate-limit'; เอาไว้ใช้จำกัดจำนวนการ login ในช่วงเวลาหนึ่ง
 
 // export const loginLimiter = rateLimit({
@@ -590,17 +593,18 @@ router.get(
   }
 );
 
+
 // 📌 Edit Profile Route
 router.put(
   "/profile",
   [
     authenticateToken,
     validateUserId,
-    upload.single("avatar"), // รับไฟล์รูปโปรไฟล์
+    upload.single("avatar"),
   ],
   async (req, res) => {
     try {
-      const {
+      let {
         name,
         email,
         phone,
@@ -610,99 +614,104 @@ router.put(
         newPassword,
       } = req.body;
 
-      // Find user by ID (from token)
+      // Debug logging
+      console.log("Profile update attempt:", {
+        userId: req.user.id,
+        hasFile: !!req.file,
+        fields: Object.keys(req.body)
+      });
+
+      // Find user
       const user = await User.findById(req.user.id);
       if (!user) {
         return res.status(404).json({
           success: false,
-          message: "User not found",
+          message: "User not found"
         });
       }
 
-      // Handle avatar upload if provided
+      // Handle numberAccount array issue
+      if (Array.isArray(numberAccount)) {
+        numberAccount = numberAccount[0];
+      }
+
+      // Check duplicates before any updates
+      if (email !== user.email || numberAccount !== user.numberAccount) {
+        const duplicateQuery = {
+          _id: { $ne: req.user.id },
+          $or: []
+        };
+
+        if (email !== user.email) duplicateQuery.$or.push({ email });
+        if (numberAccount !== user.numberAccount) duplicateQuery.$or.push({ numberAccount });
+
+        if (duplicateQuery.$or.length > 0) {
+          const duplicate = await User.findOne(duplicateQuery);
+          if (duplicate) {
+            const errors = [];
+            if (duplicate.email === email) errors.push("Email is already registered");
+            if (duplicate.numberAccount === numberAccount) errors.push("Account number is already registered");
+            
+            return res.status(400).json({
+              success: false,
+              message: "Duplicate values found",
+              details: errors
+            });
+          }
+        }
+      }
+
+      // Handle avatar upload
       if (req.file) {
         try {
-          // Delete old avatar if exists
+          // Extract original path or prepare for new one
+          let blobPath;
           if (user.avatar_url?.includes("blob.core.windows.net")) {
             try {
+              const oldUrl = new URL(user.avatar_url);
+              const originalPath = oldUrl.pathname.split('/').slice(2).join('/');
+              blobPath = originalPath;
+              
+              // Delete old avatar
               await deleteFromAzureBlob(user.avatar_url);
+              console.log(`Deleted old avatar: ${user.avatar_url}`);
             } catch (error) {
-              console.error("Error deleting old avatar:", error);
+              console.error("Error handling old avatar:", error);
             }
           }
 
+          // Create new path if none exists
+          if (!blobPath) {
+            blobPath = `avatars/${user._id}/${Date.now()}-${req.file.originalname}`;
+          }
+
           // Upload new avatar
-          const blobPath = `avatars/${user._id}/${Date.now()}-${
-            req.file.originalname
-          }`;
           const avatarUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
             userId: user._id.toString(),
             type: "avatar",
-            contentType: req.file.mimetype,
+            contentType: req.file.mimetype
           });
+
           user.avatar_url = avatarUrl;
         } catch (uploadError) {
           console.error("Avatar upload error:", uploadError);
           return res.status(500).json({
             success: false,
             message: "Failed to upload avatar",
-            error: uploadError.message,
+            error: uploadError.message
           });
         }
       }
 
-      // Check for duplicate email or account number
-      if (email !== user.email || numberAccount !== user.numberAccount) {
-        const duplicateCheck = await User.findOne({
-          $and: [
-            { _id: { $ne: req.user.id } },
-            {
-              $or: [{ email: email }, { numberAccount: numberAccount }],
-            },
-          ],
-        });
-
-        if (duplicateCheck) {
-          const errors = [];
-          if (duplicateCheck.email === email) {
-            errors.push("Email is already registered");
-          }
-          if (duplicateCheck.numberAccount === numberAccount) {
-            errors.push("Account number is already registered");
-          }
-          return res.status(400).json({
-            success: false,
-            message: "Duplicate values found",
-            details: errors,
-          });
-        }
-      }
-
-      // Validate max_limit_expense if provided
-      if (max_limit_expense) {
-        const max_limit = Number(max_limit_expense);
-        if (isNaN(max_limit)) {
-          return res.status(400).json({
-            success: false,
-            message: "max_limit_expense must be a number",
-          });
-        }
-      }
-
-      // Handle password change if requested
+      // Handle password change
       if (currentPassword && newPassword) {
-        // Verify current password
-        const isPasswordValid = await bcrypt.compare(
-          currentPassword,
-          user.password
-        );
-        if (!isPasswordValid) {
+        const isValidPassword = await bcrypt.compare(currentPassword, user.password);
+        if (!isValidPassword) {
           return res.status(400).json({
             success: false,
-            message: "Current password is incorrect",
+            message: "Current password is incorrect"
           });
         }
-        // Hash new password
         user.password = await bcrypt.hash(newPassword, 10);
       }
 
@@ -711,35 +720,60 @@ router.put(
       if (email) user.email = email;
       if (phone) user.phone = phone;
       if (numberAccount) user.numberAccount = numberAccount;
-      if (max_limit_expense) user.max_limit_expense = Number(max_limit_expense);
+      if (max_limit_expense) {
+        const limit = Number(max_limit_expense);
+        if (!isNaN(limit)) {
+          user.max_limit_expense = limit;
+        }
+      }
 
-      // Save updated user
+      // Update timestamp
+      user.updatedAt = new Date();
+
+      // Save changes
       await user.save();
 
-      // Return updated user data (excluding password)
-      const updatedUser = await User.findById(req.user.id).select("-password");
+      // Get updated user without password
+      const updatedUser = await User.findById(req.user.id)
+        .select("-password")
+        .lean();
 
+      // Format response
       res.json({
         success: true,
         message: "Profile updated successfully",
         data: {
-          user: updatedUser,
-        },
+          user: {
+            ...updatedUser,
+            avatar_url: updatedUser.avatar_url ? {
+              url: updatedUser.avatar_url,
+              path: new URL(updatedUser.avatar_url).pathname
+            } : null
+          }
+        }
       });
+
     } catch (err) {
-      console.error("Profile update error:", err);
+      console.error("Profile update error:", {
+        error: err.message,
+        stack: err.stack,
+        userId: req.user?.id,
+        body: req.body
+      });
+
       if (err.code === 11000) {
         const field = Object.keys(err.keyPattern)[0];
         return res.status(400).json({
           success: false,
           message: "Duplicate value",
-          details: [`${field} is already registered`],
+          details: [`${field} is already registered`]
         });
       }
+
       res.status(500).json({
         success: false,
         message: "Failed to update profile",
-        error: err.message,
+        error: err.message
       });
     }
   }

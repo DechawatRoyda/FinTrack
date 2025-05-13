@@ -50,32 +50,51 @@ app.use("/api/workspaces", workspaceRoutes); // เพิ่มเส้นท�
 
 app.use("/api/ocrslip", ocrSlipRoutes);
 
-// แก้ไขการกำหนด route bills
-app.use("/api/workspaces/:workspaceId/bills", (req, res, next) => {
-  // ต้องแน่ใจว่าได้ส่ง workspaceId ไปให้ bills route
-  const workspaceId = req.params.workspaceId;
-  if (!workspaceId) {
-    return res.status(400).json({
-      success: false,
-      message: "Workspace ID is required"
-    });
-  }
-  req.workspaceId = workspaceId;
-  next();
-}, billRoutes);
-
+// Update workspace routes with better middleware
 app.use("/api/workspaces/:workspaceId/requests", (req, res, next) => {
-  // ต้องแน่ใจว่าได้ส่ง workspaceId ไปให้ requests route  
   const workspaceId = req.params.workspaceId;
-  if (!workspaceId) {
+  console.log("Debug - Workspace route:", {
+    workspaceId,
+    path: req.path,
+    method: req.method
+  });
+  
+  // Validate workspace ID format
+  if (!mongoose.Types.ObjectId.isValid(workspaceId)) {
     return res.status(400).json({
       success: false,
-      message: "Workspace ID is required"
+      message: "Invalid workspace ID format"
     });
   }
+
+  // Store workspaceId in request object
   req.workspaceId = workspaceId;
+  req.params.workspaceId = workspaceId; // เพิ่มบรรทัดนี้
   next();
 }, requestRoutes);
+
+// Bills route middleware
+app.use("/api/workspaces/:workspaceId/bills", (req, res, next) => {
+  const workspaceId = req.params.workspaceId;
+  console.log("Debug - Bills route middleware:", {
+    workspaceId,
+    path: req.path,
+    method: req.method
+  });
+  
+  // Validate workspace ID format
+  if (!mongoose.Types.ObjectId.isValid(workspaceId)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid workspace ID format"
+    });
+  }
+
+  // Store workspaceId in request object
+  req.workspaceId = workspaceId;
+  req.params.workspaceId = workspaceId; // เพิ่มบรรทัดนี้
+  next();
+}, billRoutes);
 
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.url}`);
