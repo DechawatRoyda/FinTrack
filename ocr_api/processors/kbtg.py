@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from PIL import Image
 import pytesseract
+import os
 
 class KBTGProcessor(BankProcessor):
     def __init__(self):
@@ -144,6 +145,7 @@ class KBTGProcessor(BankProcessor):
         final_thai = cv2.morphologyEx(final_binary, cv2.MORPH_CLOSE, kernel_thai)
         
         # Extract text after preprocessing
+        os.environ['TESSDATA_PREFIX'] = os.environ.get('TESSDATA_PREFIX', '/usr/share/tesseract-ocr/tessdata')
         processed_image = Image.fromarray(final_thai)
         self.raw_text = pytesseract.image_to_string(processed_image, lang="eng+thai")
         

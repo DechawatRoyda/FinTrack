@@ -6,7 +6,7 @@ import Session from "../models/Session.js"; // Add this import
 import dotenv from "dotenv";
 import { authenticateToken, validateUserId } from "../middleware/auth.js";
 import { checkAdminRole, checkUserAccess } from "../middleware/adminAuth.js";
-import otpService from "../services/OtpService.js";
+import otpService from "../services/otpService.js";
 import multer from "multer";  // Add this
 import {
   validateEmailFormat,
@@ -569,6 +569,45 @@ router.get("/me", authenticateToken, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch user profile",
+      error: err.message
+    });
+  }
+});
+
+// 📌 Get All Users (Simplified Version)
+router.get("/users/simplified", authenticateToken, async (req, res) => {
+  try {
+    const users = await User.find(
+      { isActive: true }, // เลือกเฉพาะ user ที่ active
+      {
+        _id: 1,
+        username: 1,
+        name: 1,
+        email: 1
+      }
+    ).lean(); // ใช้ lean() เพื่อเพิ่มประสิทธิภาพ
+
+    // Format response
+    res.json({
+      success: true,
+      message: "Users retrieved successfully",
+      data: users.map(user => ({
+        id: user._id,
+        username: user.username,
+        name: user.name,
+        email: user.email
+      }))
+    });
+
+  } catch (err) {
+    console.error("Error fetching simplified users:", {
+      error: err.message,
+      stack: err.stack
+    });
+    
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch users",
       error: err.message
     });
   }

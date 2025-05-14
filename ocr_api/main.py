@@ -139,15 +139,26 @@ async def process_ocr(file: UploadFile = File(...)):
         
         print(f"Initial OCR text: {formatted_data[:100]}...")
 
-        # Test with each processor
+        # # Test with each processor
+        # for processor in processors:
+        #     if processor.can_process(formatted_data):
+        #         # If it's KBTG or BBL processor, let it do its own preprocessing and OCR
+        #         if isinstance(processor, (KBTGProcessor, BBLProcessor)):
+        #             special_processed = processor.preprocess_image(image)
+        #             # Use processor's raw text
+        #             text = processor.raw_text
+        #             formatted_data = processor.clean_text(text)
+        #             extracted_data = processor.extract_details(formatted_data)
+        #             special_processed.save("debug_special.png")
+        #         # Test with each processor
         for processor in processors:
             if processor.can_process(formatted_data):
                 # If it's KBTG or BBL processor, let it do its own preprocessing and OCR
                 if isinstance(processor, (KBTGProcessor, BBLProcessor)):
                     special_processed = processor.preprocess_image(image)
-                    # Use processor's raw text
-                    text = processor.raw_text
-                    formatted_data = processor.clean_text()
+                    special_text = pytesseract.image_to_string(special_processed, 
+                                                                 lang="eng+Thai")
+                    formatted_data = processor.clean_text(special_text)
                     extracted_data = processor.extract_details(formatted_data)
                     special_processed.save("debug_special.png")
                 else:

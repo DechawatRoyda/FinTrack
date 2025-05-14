@@ -1,4 +1,4 @@
-import otpService from '../services/OtpService.js';
+import otpService from '../services/otpService.js';
 
 export const verifyOTP = async (req, res, next) => {
   try {

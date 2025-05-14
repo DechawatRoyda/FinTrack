@@ -1,5 +1,5 @@
 import express from "express";
-import otpService from "../services/OtpService.js";
+import otpService from "../services/otpService.js";
 import { verifyOTP } from "../middleware/otpVerification.js";
 import User from "../models/User.js";
 
