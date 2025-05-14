@@ -42,7 +42,7 @@ router.post(
       const workspaceId = workspace && workspace.trim() !== "" ? workspace : null;
 
       // Validate required fields
-      if (!type || !amount || !category || !req.file) {
+      if (!type || !amount || !category) {
         return res.status(400).json({
           success: false,
           message: "Missing required fields",
@@ -50,7 +50,6 @@ router.post(
             type: !type,
             amount: !amount,
             category: !category,
-            slip_image: !req.file,
           },
         });
       }
@@ -65,27 +64,29 @@ router.post(
       }
 
       // Upload file to Azure Blob using helper function
-      let blobUrl;
-      try {
-        const uniqueFilename = generateTransactionPath(
-          req.user.id,
-          workspaceId,
-          req.file.originalname
-        );
+      let blobUrl = null;
+      if (req.file) {
+        try {
+          const uniqueFilename = generateTransactionPath(
+            req.user.id,
+            workspaceId,
+            req.file.originalname
+          );
 
-        blobUrl = await uploadToAzureBlob(req.file.buffer, uniqueFilename, {
-          userId: req.user.id,
-          workspaceId: workspaceId,
-          type: "transaction-slip",
-          contentType: req.file.mimetype,
-        });
-      } catch (uploadError) {
-        console.error("File upload error:", uploadError);
-        return res.status(500).json({
-          success: false,
-          message: "Failed to upload slip image",
-          error: uploadError.message,
-        });
+          blobUrl = await uploadToAzureBlob(req.file.buffer, uniqueFilename, {
+            userId: req.user.id,
+            workspaceId: workspaceId,
+            type: "transaction-slip",
+            contentType: req.file.mimetype,
+          });
+        } catch (uploadError) {
+          console.error("File upload error:", uploadError);
+          return res.status(500).json({
+            success: false,
+            message: "Failed to upload slip image",
+            error: uploadError.message,
+          });
+        }
       }
 
       // Create transaction

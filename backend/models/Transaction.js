@@ -32,7 +32,7 @@ const transactionSchema = new mongoose.Schema({
   },
   slip_image: {
     type: String,
-    required: true
+    required: false
   },
   transaction_date: {
     type: Date,

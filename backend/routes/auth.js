@@ -578,7 +578,7 @@ router.get("/me", authenticateToken, async (req, res) => {
 router.get("/users/simplified", authenticateToken, async (req, res) => {
   try {
     const users = await User.find(
-      { isActive: true }, // เลือกเฉพาะ user ที่ active
+      { isActive: true ,role: "user"}, // เลือกเฉพาะ user ที่ active
       {
         _id: 1,
         username: 1,
