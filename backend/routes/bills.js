@@ -283,7 +283,8 @@ router.post(
                   (_, i) => ({
                     round: i + 1,
                     amount: share.shareAmount,
-                    status: isCreator ? "paid" : "pending" // Auto-paid for creator
+                    status: isCreator ? "paid" : "pending", // Auto-paid for creator
+                    eSlip: null // เพิ่ม eSlip เป็น null สำหรับแต่ละ round
                   })
                 )
               : [];
@@ -293,7 +294,8 @@ router.post(
               name: sharedUser?.name,
               status: isCreator ? "paid" : "pending", // Auto-paid for creator
               shareAmount: share.shareAmount,
-              roundPayments
+              roundPayments,
+              eSlip: null, // เพิ่ม eSlip เป็น null สำหรับแต่ละ round
             };
           })
         })),
@@ -329,9 +331,7 @@ router.post(
 );
 
 // 2️⃣ ดึงข้อมูลบิลทั้งหมดใน workspace
-router.get(
-  "/",
-  [authenticateToken, validateUserId, checkWorkspaceBillAccess],
+router.get("/", [authenticateToken, validateUserId, checkWorkspaceBillAccess],
   async (req, res) => {
     try {
       const bills = await Bill.find({ workspace: req.workspaceId })
@@ -343,6 +343,8 @@ router.get(
       const billsWithRound = bills.map((bill) => {
         let roundDueDates = [];
         let roundStatus = [];
+
+        // Calculate round payment dates if needed
         if (
           bill.paymentType === "round" &&
           bill.roundDetails?.dueDate &&
@@ -361,10 +363,8 @@ router.get(
           }
         }
 
-        // ดึง currentRound
         const currentRound = bill.roundDetails?.currentRound || 1;
 
-        // สร้าง response object ที่มีแต่ข้อมูลที่จำเป็น
         return {
           _id: bill._id,
           workspace: bill.workspace,
@@ -376,37 +376,37 @@ router.get(
             description: item.description,
             amount: item.amount,
             sharedWith: item.sharedWith.map((share) => ({
-              user:
-                share.user && typeof share.user === "object"
-                  ? {
-                      _id: share.user._id,
-                      name: share.user.name,
-                      email: share.user.email,
-                    }
-                  : share.user,
+              user: share.user && typeof share.user === "object"
+                ? {
+                    _id: share.user._id,
+                    name: share.user.name,
+                    email: share.user.email,
+                  }
+                : share.user,
               name: share.name,
               status: share.status,
               shareAmount: share.shareAmount,
-              // filter เฉพาะรอบที่ <= currentRound เท่านั้น
-              roundPayments: (share.roundPayments || []).filter(
-                (p) => p.round <= currentRound
-              ),
-              eSlip: share.eSlip
-                ? {
-                    url: share.eSlip,
-                    path: new URL(share.eSlip).pathname,
-                  }
-                : null,
+              roundPayments: (share.roundPayments || [])
+                .filter((p) => p.round <= currentRound)
+                .map(payment => ({
+                  ...payment,
+                  eSlip: payment.eSlip ? {
+                    url: payment.eSlip,
+                    path: new URL(payment.eSlip).pathname
+                  } : null
+                })),
+              eSlip: share.eSlip ? {
+                url: share.eSlip,
+                path: new URL(share.eSlip).pathname,
+              } : null,
             })),
           })),
           note: bill.note,
           status: bill.status,
-          eSlip: bill.eSlip
-            ? {
-                url: bill.eSlip,
-                path: new URL(bill.eSlip).pathname,
-              }
-            : null,
+          eSlip: bill.eSlip ? {
+            url: bill.eSlip,
+            path: new URL(bill.eSlip).pathname,
+          } : null,
           createdAt: bill.createdAt,
           updatedAt: bill.updatedAt,
           statusInfo: {
@@ -416,17 +416,12 @@ router.get(
             canceledBy: bill.canceledBy,
             paidAt: bill.status === "paid" ? bill.updatedAt : null,
           },
-          roundInfo:
-            bill.paymentType === "round"
-              ? {
-                  currentRound: bill.roundDetails?.currentRound,
-                  totalPeriod: bill.roundDetails?.totalPeriod,
-                  dueDate: bill.roundDetails?.dueDate,
-                  isLastRound:
-                    bill.roundDetails?.currentRound ===
-                    bill.roundDetails?.totalPeriod,
-                }
-              : null,
+          roundInfo: bill.paymentType === "round" ? {
+            currentRound: bill.roundDetails?.currentRound,
+            totalPeriod: bill.roundDetails?.totalPeriod,
+            dueDate: bill.roundDetails?.dueDate,
+            isLastRound: bill.roundDetails?.currentRound === bill.roundDetails?.totalPeriod,
+          } : null,
           roundDueDates,
           roundStatus,
         };
@@ -438,6 +433,7 @@ router.get(
         data: billsWithRound,
         count: billsWithRound.length,
       });
+
     } catch (err) {
       console.error(`Error in ${req.method} ${req.originalUrl}:`, {
         error: err.message,
@@ -458,16 +454,11 @@ router.get(
  * @route GET /api/bills/my-bills
  * @desc Get bills where user is creator or shared with
  */
-router.get(
-  "/my-bills",
-  [authenticateToken, validateUserId, checkWorkspaceBillAccess],
+router.get("/my-bills", [authenticateToken, validateUserId, checkWorkspaceBillAccess],
   async (req, res) => {
     try {
       const userId = getUserId(req.user);
 
-      // ค้นหาบิลที่:
-      // 1. เป็นคนสร้างบิล หรือ
-      // 2. เป็นคนที่ต้องจ่ายเงินในบิล
       const bills = await Bill.find({
         workspace: req.workspaceId,
         $or: [
@@ -484,7 +475,6 @@ router.get(
         let roundDueDates = [];
         let roundStatus = [];
 
-        // คำนวณข้อมูลสำหรับการผ่อนชำระ
         if (
           bill.paymentType === "round" &&
           bill.roundDetails?.dueDate &&
@@ -503,7 +493,6 @@ router.get(
           }
         }
 
-        // ดึง currentRound
         const currentRound = bill.roundDetails?.currentRound || 1;
 
         return {
@@ -521,25 +510,27 @@ router.get(
               name: share.name,
               status: share.status,
               shareAmount: share.shareAmount,
-              roundPayments: (share.roundPayments || []).filter(
-                (p) => p.round <= currentRound
-              ),
-              eSlip: share.eSlip
-                ? {
-                    url: share.eSlip,
-                    path: new URL(share.eSlip).pathname,
-                  }
-                : null,
+              roundPayments: (share.roundPayments || [])
+                .filter((p) => p.round <= currentRound)
+                .map(payment => ({
+                  ...payment,
+                  eSlip: payment.eSlip ? {
+                    url: payment.eSlip,
+                    path: new URL(payment.eSlip).pathname
+                  } : null
+                })),
+              eSlip: share.eSlip ? {
+                url: share.eSlip,
+                path: new URL(share.eSlip).pathname,
+              } : null,
             })),
           })),
           note: bill.note,
           status: bill.status,
-          eSlip: bill.eSlip
-            ? {
-                url: bill.eSlip,
-                path: new URL(bill.eSlip).pathname,
-              }
-            : null,
+          eSlip: bill.eSlip ? {
+            url: bill.eSlip,
+            path: new URL(bill.eSlip).pathname,
+          } : null,
           createdAt: bill.createdAt,
           updatedAt: bill.updatedAt,
           roundDueDates,
@@ -560,6 +551,7 @@ router.get(
         data: myBills,
         count: myBills.length,
       });
+
     } catch (err) {
       console.error(`Error in get my bills:`, {
         error: err.message,
@@ -577,9 +569,7 @@ router.get(
 );
 
 // 2.1️⃣ ดึงข้อมูลบิลตาม ID
-router.get(
-  "/:id",
-  [authenticateToken, validateUserId, checkWorkspaceBillAccess],
+router.get("/:id", [authenticateToken, validateUserId, checkWorkspaceBillAccess],
   async (req, res) => {
     const { id } = req.params;
     try {
@@ -599,7 +589,6 @@ router.get(
         });
       }
 
-      // เพิ่มฟิลด์ roundDueDates และ roundStatus
       let roundDueDates = [];
       let roundStatus = [];
       if (
@@ -621,10 +610,8 @@ router.get(
         }
       }
 
-      // ดึง currentRound
       const currentRound = bill.roundDetails?.currentRound || 1;
 
-      // สร้าง response object ที่มีแต่ข้อมูลที่จำเป็น
       const billDetails = {
         _id: bill._id,
         workspace: bill.workspace,
@@ -648,28 +635,27 @@ router.get(
             name: share.name,
             status: share.status,
             shareAmount: share.shareAmount,
-            // filter เฉพาะรอบที่ <= currentRound หรือยังไม่จ่าย
-            roundPayments: (share.roundPayments || []).filter(
-              (p) =>
-                p.round <= currentRound ||
-                (p.status !== "paid" && p.round < currentRound)
-            ),
-            eSlip: share.eSlip
-              ? {
-                  url: share.eSlip,
-                  path: new URL(share.eSlip).pathname,
-                }
-              : null,
+            roundPayments: (share.roundPayments || [])
+              .filter((p) => p.round <= currentRound)
+              .map(payment => ({
+                ...payment,
+                eSlip: payment.eSlip ? {
+                  url: payment.eSlip,
+                  path: new URL(payment.eSlip).pathname
+                } : null
+              })),
+            eSlip: share.eSlip ? {
+              url: share.eSlip,
+              path: new URL(share.eSlip).pathname,
+            } : null,
           })),
         })),
         note: bill.note,
         status: bill.status,
-        eSlip: bill.eSlip
-          ? {
-              url: bill.eSlip,
-              path: new URL(bill.eSlip).pathname,
-            }
-          : null,
+        eSlip: bill.eSlip ? {
+          url: bill.eSlip,
+          path: new URL(bill.eSlip).pathname,
+        } : null,
         createdAt: bill.createdAt,
         updatedAt: bill.updatedAt,
         statusInfo: {
@@ -679,17 +665,12 @@ router.get(
           canceledBy: bill.canceledBy,
           paidAt: bill.status === "paid" ? bill.updatedAt : null,
         },
-        roundInfo:
-          bill.paymentType === "round"
-            ? {
-                currentRound: bill.roundDetails?.currentRound,
-                totalPeriod: bill.roundDetails?.totalPeriod,
-                dueDate: bill.roundDetails?.dueDate,
-                isLastRound:
-                  bill.roundDetails?.currentRound ===
-                  bill.roundDetails?.totalPeriod,
-              }
-            : null,
+        roundInfo: bill.paymentType === "round" ? {
+          currentRound: bill.roundDetails?.currentRound,
+          totalPeriod: bill.roundDetails?.totalPeriod,
+          dueDate: bill.roundDetails?.dueDate,
+          isLastRound: bill.roundDetails?.currentRound === bill.roundDetails?.totalPeriod,
+        } : null,
         roundDueDates,
         roundStatus,
       };
@@ -699,6 +680,7 @@ router.get(
         message: "Bill retrieved successfully",
         data: billDetails,
       });
+
     } catch (err) {
       console.error(`Error in ${req.method} ${req.originalUrl}:`, {
         error: err.message,
