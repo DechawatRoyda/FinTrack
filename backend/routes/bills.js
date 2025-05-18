@@ -71,109 +71,136 @@ router.post(
     authenticateToken,
     validateUserId,
     checkWorkspaceBillAccess,
-    // ถ้า validateBillCreation เช็ค items จาก req.body.items เท่านั้น ให้ย้ายไปเช็คเองใน handler
     upload.single("eSlip"),
   ],
   async (req, res) => {
     try {
       const workspace = req.workspaceId;
-      let items = null;
+      let items = [];
       let note, paymentType, roundDetails;
 
-      // รองรับทั้ง form-data และ JSON
-      const isMultipart =
-        req.headers["content-type"] &&
-        req.headers["content-type"].includes("multipart/form-data");
+      // Parse form data
+      const isMultipart = req.headers["content-type"]?.includes("multipart/form-data");
 
       if (isMultipart) {
-        // กรณี items เป็น array object (เช่น front ส่ง JSON.stringify(items) หรือ Postman ส่งเป็น array object)
-        if (Array.isArray(req.body.items)) {
-          items = req.body.items.map((item) => ({
-            description: item.description,
-            amount: parseFloat(item.amount),
-            sharedWith: Array.isArray(item.sharedWith)
-              ? item.sharedWith.map((share) => ({
-                  user: share.user,
-                  shareAmount: parseFloat(share.shareAmount),
-                }))
-              : [],
-          }));
-          note = req.body.note;
-          paymentType = req.body.paymentType;
-          if (req.body.roundDetails) {
-            try {
-              roundDetails = JSON.parse(req.body.roundDetails);
-            } catch {
-              roundDetails = req.body.roundDetails;
-            }
+        // Handle array of items
+        if (req.body.items) {
+          try {
+            // Try parsing if items is JSON string
+            items = typeof req.body.items === 'string' 
+              ? JSON.parse(req.body.items)
+              : req.body.items;
+
+            items = items.map(item => ({
+              description: item.description,
+              amount: parseFloat(item.amount),
+              sharedWith: Array.isArray(item.sharedWith)
+                ? item.sharedWith.map(share => ({
+                    user: share.user,
+                    shareAmount: parseFloat(share.shareAmount)
+                  }))
+                : []
+            }));
+          } catch (error) {
+            console.error("Error parsing items:", error);
+            return res.status(400).json({
+              success: false,
+              message: "Invalid items format",
+              error: error.message
+            });
           }
         } else {
-          // กรณี items[0][description] แบบดั้งเดิม
-          let item = {
-            description: req.body["items[0][description]"],
-            amount: parseFloat(req.body["items[0][amount]"]),
-            sharedWith: [],
-          };
-          let i = 0;
-          while (req.body[`items[0][sharedWith][${i}][user]`]) {
-            item.sharedWith.push({
-              user: req.body[`items[0][sharedWith][${i}][user]`],
-              shareAmount: parseFloat(
-                req.body[`items[0][sharedWith][${i}][shareAmount]`]
-              ),
-            });
-            i++;
-          }
-          items = [item];
-          note = req.body.note;
-          paymentType = req.body.paymentType;
-          if (req.body.roundDetails) {
-            try {
-              roundDetails = JSON.parse(req.body.roundDetails);
-            } catch {
-              roundDetails = req.body.roundDetails;
+          // Handle form-data fields format
+          const formItems = [];
+          let itemIndex = 0;
+
+          while (req.body[`items[${itemIndex}][description]`]) {
+            const item = {
+              description: req.body[`items[${itemIndex}][description]`],
+              amount: parseFloat(req.body[`items[${itemIndex}][amount]`]),
+              sharedWith: []
+            };
+
+            let shareIndex = 0;
+            while (req.body[`items[${itemIndex}][sharedWith][${shareIndex}][user]`]) {
+              item.sharedWith.push({
+                user: req.body[`items[${itemIndex}][sharedWith][${shareIndex}][user]`],
+                shareAmount: parseFloat(
+                  req.body[`items[${itemIndex}][sharedWith][${shareIndex}][shareAmount]`]
+                )
+              });
+              shareIndex++;
             }
+
+            formItems.push(item);
+            itemIndex++;
+          }
+
+          items = formItems;
+        }
+
+        note = req.body.note;
+        paymentType = req.body.paymentType;
+        
+        if (req.body.roundDetails) {
+          try {
+            roundDetails = JSON.parse(req.body.roundDetails);
+          } catch {
+            roundDetails = req.body.roundDetails;
           }
         }
       } else {
-        // รับแบบ JSON ปกติ
+        // Handle JSON format
         items = req.body.items;
         note = req.body.note;
         paymentType = req.body.paymentType;
         roundDetails = req.body.roundDetails;
       }
 
-      // ตรวจสอบ items (validation)
-      if (
-        !items ||
-        !Array.isArray(items) ||
-        !items.length ||
-        !items[0].description ||
-        !items[0].amount ||
-        !items[0].sharedWith ||
-        !Array.isArray(items[0].sharedWith) ||
-        !items[0].sharedWith.length
-      ) {
+      // Validate items
+      if (!items?.length || !Array.isArray(items)) {
         return res.status(400).json({
           success: false,
           message: "Items array is required",
-          debug: { items, body: req.body },
+          debug: { items, body: req.body }
         });
       }
 
-      // Upload eSlip ถ้ามี
+      // Validate each item
+      for (const item of items) {
+        if (!item.description || !item.amount || !item.sharedWith?.length) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid item format",
+            debug: { item }
+          });
+        }
+
+        for (const share of item.sharedWith) {
+          if (!share.user || !share.shareAmount) {
+            return res.status(400).json({
+              success: false,
+              message: "Invalid share format",
+              debug: { share }
+            });
+          }
+        }
+      }
+
+      // Handle file upload
       let slipUrl = null;
       if (req.file) {
         const blobPath = generateBillBlobPath("bill-create", {
           userId: req.userId,
           workspaceId: workspace,
-          originalname: req.file.originalname,
+          originalname: req.file.originalname
         });
+
         slipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
           userId: req.userId.toString(),
           workspaceId: workspace.toString(),
           type: "bill-creation",
-          contentType: req.file.mimetype,
+          contentType: req.file.mimetype
         });
       }
 
@@ -182,66 +209,61 @@ router.post(
       if (!user) {
         return res.status(404).json({
           success: false,
-          message: "Creator not found",
+          message: "Creator not found"
         });
       }
 
       // Get shared users info
-      const sharedUserIds = items[0].sharedWith.map((share) => share.user);
+      const sharedUserIds = [...new Set(
+        items.flatMap(item => item.sharedWith.map(share => share.user))
+      )];
+      
       const sharedUsers = await User.find({ _id: { $in: sharedUserIds } });
 
       // Create bill
       const bill = new Bill({
         workspace,
-        creator: [
-          {
-            userId: req.userId,
-            name: user.name,
-            numberAccount: user.numberAccount,
-          },
-        ],
+        creator: [{
+          userId: req.userId,
+          name: user.name,
+          numberAccount: user.numberAccount
+        }],
         paymentType: paymentType || "normal",
-        roundDetails:
-          paymentType === "round"
-            ? {
-                dueDate: roundDetails?.dueDate,
-                totalPeriod: roundDetails?.totalPeriod,
-                currentRound: 1,
-              }
-            : undefined,
-        items: [
-          {
-            ...items[0],
-            sharedWith: items[0].sharedWith.map((share) => {
-              const sharedUser = sharedUsers.find(
-                (user) => user._id.toString() === share.user.toString()
-              );
+        roundDetails: paymentType === "round" ? {
+          dueDate: roundDetails?.dueDate,
+          totalPeriod: roundDetails?.totalPeriod,
+          currentRound: 1
+        } : undefined,
+        items: items.map(item => ({
+          description: item.description,
+          amount: item.amount,
+          sharedWith: item.sharedWith.map(share => {
+            const sharedUser = sharedUsers.find(
+              u => u._id.toString() === share.user.toString()
+            );
 
-              const roundPayments =
-                paymentType === "round" && roundDetails?.totalPeriod
-                  ? Array.from(
-                      { length: roundDetails.totalPeriod },
-                      (_, i) => ({
-                        round: i + 1,
-                        amount: share.shareAmount,
-                        status: "pending",
-                      })
-                    )
-                  : undefined;
+            const roundPayments = paymentType === "round" && roundDetails?.totalPeriod
+              ? Array.from({ length: roundDetails.totalPeriod }, 
+                  (_, i) => ({
+                    round: i + 1,
+                    amount: share.shareAmount,
+                    status: "pending"
+                  })
+                )
+              : undefined;
 
-              return {
-                user: share.user,
-                name: sharedUser?.name,
-                status: "pending",
-                shareAmount: share.shareAmount,
-                roundPayments,
-              };
-            }),
-          },
-        ],
+            return {
+              user: share.user,
+              name: sharedUser?.name,
+              status: "pending",
+              shareAmount: share.shareAmount,
+              roundPayments
+            };
+          })
+        })),
         note,
         eSlip: slipUrl,
-        status: "pending",
+        status: "pending"
       });
 
       await bill.save();
@@ -249,20 +271,22 @@ router.post(
       res.status(201).json({
         success: true,
         message: "Bill created successfully",
-        data: bill,
+        data: bill
       });
+
     } catch (err) {
-      console.error(`Error in create bill:`, {
+      console.error("Error creating bill:", {
         error: err.message,
         stack: err.stack,
         userId: req.userId,
         workspace: req.workspaceId,
-        body: req.body,
+        body: req.body
       });
+
       res.status(500).json({
         success: false,
         message: "Failed to create bill",
-        error: err.message,
+        error: err.message
       });
     }
   }
