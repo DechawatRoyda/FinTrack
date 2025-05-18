@@ -187,6 +187,54 @@ router.post(
         }
       }
 
+      // Get workspace data and validate
+      const workspaceData = await Workspace.findById(workspace);
+      if (!workspaceData) {
+        return res.status(404).json({
+          success: false,
+          message: "Workspace not found"
+        });
+      }
+
+      // Create array of all valid member IDs in workspace
+      const workspaceMembers = [
+        workspaceData.owner.toString(),
+        ...workspaceData.members.map(member => member.user.toString())
+      ];
+
+      // Get creator info
+      const user = await User.findById(req.userId);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "Creator not found"
+        });
+      }
+
+      // Get shared users info and validate workspace membership
+      const sharedUserIds = [...new Set(
+        items.flatMap(item => item.sharedWith.map(share => share.user))
+      )];
+
+      // Validate all users are workspace members
+      const invalidUsers = sharedUserIds.filter(userId => 
+        !workspaceMembers.includes(userId.toString())
+      );
+
+      if (invalidUsers.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Some users are not members of this workspace",
+          data: {
+            invalidUsers,
+            workspace: workspaceData._id
+          }
+        });
+      }
+
+      // Get users info for valid members
+      const sharedUsers = await User.find({ _id: { $in: sharedUserIds } });
+
       // Handle file upload
       let slipUrl = null;
       if (req.file) {
@@ -203,22 +251,6 @@ router.post(
           contentType: req.file.mimetype
         });
       }
-
-      // Get creator info
-      const user = await User.findById(req.userId);
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: "Creator not found"
-        });
-      }
-
-      // Get shared users info
-      const sharedUserIds = [...new Set(
-        items.flatMap(item => item.sharedWith.map(share => share.user))
-      )];
-      
-      const sharedUsers = await User.find({ _id: { $in: sharedUserIds } });
 
       // Create bill
       const bill = new Bill({
@@ -242,20 +274,24 @@ router.post(
               u => u._id.toString() === share.user.toString()
             );
 
+            // Check if this share belongs to creator
+            const isCreator = share.user.toString() === req.userId.toString();
+
+            // Create round payments with auto-paid for creator
             const roundPayments = paymentType === "round" && roundDetails?.totalPeriod
               ? Array.from({ length: roundDetails.totalPeriod }, 
                   (_, i) => ({
                     round: i + 1,
                     amount: share.shareAmount,
-                    status: "pending"
+                    status: isCreator ? "paid" : "pending" // Auto-paid for creator
                   })
                 )
-              : undefined;
+              : [];
 
             return {
               user: share.user,
               name: sharedUser?.name,
-              status: "pending",
+              status: isCreator ? "paid" : "pending", // Auto-paid for creator
               shareAmount: share.shareAmount,
               roundPayments
             };
@@ -966,135 +1002,212 @@ router.post(
   ],
   async (req, res) => {
     const { id } = req.params;
-    const itemId = req.body.itemId;
+
+    // Parse itemIds correctly
+    let itemIds;
+    try {
+      // Handle JSON string array
+      if (typeof req.body.itemId === 'string' && req.body.itemId.startsWith('[')) {
+        itemIds = JSON.parse(req.body.itemId);
+      } else {
+        // Handle direct array or single value
+        itemIds = Array.isArray(req.body.itemId) 
+          ? req.body.itemId 
+          : [req.body.itemId];
+      }
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid itemId format",
+        error: error.message
+      });
+    }
 
     try {
-      const bill = req.bill;
+      const bill = await Bill.findById(id).populate('workspace');
 
-      // ตรวจสอบว่ามีไฟล์แนบมาไหม
+      // Validate bill exists
+      if (!bill) {
+        return res.status(404).json({
+          success: false,
+          message: "Bill not found"
+        });
+      }
+
+      // Check for required file
       if (!req.file) {
         return res.status(400).json({
           success: false,
-          message: "Payment slip is required",
+          message: "Payment slip is required"
         });
       }
 
-      // หา item ในบิล
-      const item = bill.items.find((item) => item._id.toString() === itemId);
-      if (!item) {
-        return res.status(404).json({
-          success: false,
-          message: "Item not found in this bill",
-        });
-      }
+      // Check if user is workspace owner
+      const isWorkspaceOwner = bill.workspace.owner.toString() === req.userId.toString();
 
-      // หาข้อมูลการแชร์ของผู้ใช้
-      const userShare = item.sharedWith.find(
-        (share) => share.user.toString() === req.userId.toString()
-      );
-      if (!userShare) {
-        return res.status(404).json({
-          success: false,
-          message: "User not found in shared list",
-        });
-      }
+      // Upload file once for all items
+      const blobPath = generateBillBlobPath("payment-submit", {
+        userId: req.userId,
+        billId: bill._id,
+        timestamp: Date.now(),
+        originalname: req.file.originalname
+      });
 
-      // เช็คว่าเป็นบิลแบบ round หรือไม่
-      if (bill.paymentType === "round") {
-        const currentRound = bill.roundDetails.currentRound;
+      const slipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
+        userId: req.userId.toString(),
+        billId: bill._id.toString(),
+        type: "payment-slip",
+        contentType: req.file.mimetype
+      });
 
-        // หา roundPayment ของรอบปัจจุบัน
-        const currentRoundPayment = userShare.roundPayments.find(
-          (p) => p.round === currentRound
-        );
+      // Track updates
+      const results = {
+        successful: [],
+        failed: []
+      };
 
-        if (!currentRoundPayment) {
-          return res.status(400).json({
-            success: false,
-            message: `Round payment #${currentRound} not found`,
+      // Process each item
+      for (const itemId of itemIds) {
+        try {
+          // Find item
+          const item = bill.items.find(item => 
+            item._id.toString() === itemId.toString()
+          );
+
+          if (!item) {
+            results.failed.push({
+              itemId,
+              reason: "Item not found in bill"
+            });
+            continue;
+          }
+
+          // Find user's share
+          const userShare = item.sharedWith.find(share => 
+            share.user.toString() === req.userId.toString()
+          );
+
+          if (!userShare) {
+            results.failed.push({
+              itemId,
+              reason: "User not found in shared list"
+            });
+            continue;
+          }
+
+          // Handle round payment
+          if (bill.paymentType === "round") {
+            const currentRound = bill.roundDetails.currentRound;
+            const roundPayment = userShare.roundPayments.find(p => 
+              p.round === currentRound
+            );
+
+            if (!roundPayment) {
+              results.failed.push({
+                itemId,
+                reason: `Round payment #${currentRound} not found`
+              });
+              continue;
+            }
+
+            if (roundPayment.status === "paid") {
+              results.failed.push({
+                itemId,
+                reason: `Round #${currentRound} is already paid`
+              });
+              continue;
+            }
+
+            // Set status based on whether user is owner
+            roundPayment.status = isWorkspaceOwner ? "paid" : "awaiting_confirmation";
+            roundPayment.eSlip = slipUrl;
+
+          } else {
+            // Handle normal payment
+            if (userShare.status === "paid") {
+              results.failed.push({
+                itemId,
+                reason: "This share is already paid"
+              });
+              continue;
+            }
+
+            // Set status based on whether user is owner
+            userShare.status = isWorkspaceOwner ? "paid" : "awaiting_confirmation";
+            userShare.eSlip = slipUrl;
+          }
+
+          // Create transaction immediately if owner
+          if (isWorkspaceOwner) {
+            const transaction = new Transaction({
+              user: bill.creator[0].userId,
+              workspace: bill.workspace._id,
+              type: "Income",
+              amount: userShare.shareAmount,
+              category: "Bill Payment",
+              description: bill.paymentType === "round" 
+                ? `Bill payment from ${userShare.name} (Round ${bill.roundDetails.currentRound}/${bill.roundDetails.totalPeriod})`
+                : `Bill payment from ${userShare.name}`,
+              slip_image: slipUrl,
+              reference: {
+                type: "Bill",
+                id: bill._id,
+                itemId: itemId,
+                userId: req.userId
+              }
+            });
+
+            await transaction.save();
+          }
+
+          results.successful.push({
+            itemId,
+            amount: userShare.shareAmount,
+            status: isWorkspaceOwner ? "paid" : "awaiting_confirmation"
+          });
+
+        } catch (itemError) {
+          results.failed.push({
+            itemId,
+            reason: itemError.message
           });
         }
-
-        // เช็คสถานะการจ่ายเงินรอบปัจจุบัน
-        if (currentRoundPayment.status === "paid") {
-          return res.status(400).json({
-            success: false,
-            message: `Round #${currentRound} is already paid`,
-          });
-        }
-
-        // สร้าง path สำหรับเก็บไฟล์แต่ละรอบ
-        const blobPath = generateBillBlobPath("payment-submit", {
-          userId: req.userId,
-          billId: bill._id,
-          itemId: itemId,
-          round: currentRound,
-          originalname: req.file.originalname,
-        });
-
-        // อัพโหลดสลิป
-        const slipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
-          userId: req.userId.toString(),
-          billId: bill._id.toString(),
-          itemId: itemId,
-          round: currentRound,
-          type: "round-payment-slip",
-        });
-
-        // อัพเดตสถานะและ URL สลิปของรอบปัจจุบัน
-        currentRoundPayment.status = "awaiting_confirmation";
-        currentRoundPayment.eSlip = slipUrl;
-      } else {
-        // กรณีบิลปกติ
-        // เช็คสถานะการจ่ายเงิน
-        if (userShare.status === "paid") {
-          return res.status(400).json({
-            success: false,
-            message: "This share is already paid",
-          });
-        }
-
-        // สร้าง path สำหรับเก็บไฟล์
-        const blobPath = generateBillBlobPath("payment-submit", {
-          userId: req.userId,
-          billId: bill._id,
-          itemId: itemId,
-          originalname: req.file.originalname,
-        });
-
-        // อัพโหลดสลิป
-        const slipUrl = await uploadToAzureBlob(req.file.buffer, blobPath, {
-          userId: req.userId.toString(),
-          billId: bill._id.toString(),
-          itemId: itemId,
-          type: "payment-slip",
-        });
-
-        // อัพเดตสถานะและ URL สลิป
-        userShare.status = "awaiting_confirmation";
-        userShare.eSlip = slipUrl;
       }
 
-      await bill.save();
+      // Save if any successful updates
+      if (results.successful.length > 0) {
+        await bill.save();
+      }
 
+      // Send response
       res.json({
         success: true,
-        message: "Payment evidence submitted successfully",
-        data: bill,
+        message: "Payment evidence submitted",
+        data: {
+          bill,
+          summary: {
+            totalItems: itemIds.length,
+            successful: results.successful,
+            failed: results.failed,
+            slipUrl: slipUrl,
+            isWorkspaceOwner
+          }
+        }
       });
+
     } catch (err) {
-      console.error(`Error in payment submission:`, {
+      console.error("Error in bulk payment submission:", {
         error: err.message,
         stack: err.stack,
         userId: req.userId,
         billId: id,
-        itemId: itemId,
-        file: req.file,
+        itemIds: itemIds
       });
+
       res.status(500).json({
         success: false,
-        message: "Failed to submit payment",
-        error: err.message,
+        message: "Failed to process payment",
+        error: err.message
       });
     }
   }
@@ -1120,155 +1233,227 @@ router.patch(
     const { id } = req.params;
     try {
       const bill = req.bill;
-      const { itemId, userIdToConfirm } = req.body;
-
-      // Find item and user share
-      const item = bill.items.find((item) => item._id.toString() === itemId);
-      if (!item) {
-        return res.status(404).json({
-          success: false,
-          message: "Item not found in this bill",
-        });
-      }
-
-      const userShare = item.sharedWith.find(
-        (share) => share.user.toString() === userIdToConfirm
-      );
-      if (!userShare) {
-        return res.status(404).json({
-          success: false,
-          message: "User not found in shared list",
-        });
-      }
-
-      // เช็คว่าเป็นบิลแบบ round หรือไม่
-      if (bill.paymentType === "round") {
-        const currentRound = bill.roundDetails.currentRound;
-
-        // หา roundPayment ของรอบปัจจุบัน
-        const currentRoundPayment = userShare.roundPayments.find(
-          (p) => p.round === currentRound
-        );
-
-        if (
-          !currentRoundPayment ||
-          currentRoundPayment.status !== "awaiting_confirmation"
-        ) {
+      
+      // Parse itemIds correctly
+      let itemsToConfirm = [];
+      
+      if (typeof req.body.items === 'string') {
+        // Parse JSON string
+        try {
+          itemsToConfirm = JSON.parse(req.body.items);
+        } catch (e) {
           return res.status(400).json({
             success: false,
-            message: "Payment is not awaiting confirmation for current round",
+            message: "Invalid items format",
+            error: e.message
           });
         }
+      } else if (Array.isArray(req.body.items)) {
+        // Already an array
+        itemsToConfirm = req.body.items;
+      } else {
+        // Single item
+        itemsToConfirm = [{
+          itemId: req.body.itemId,
+          userIdToConfirm: req.body.userIdToConfirm
+        }];
+      }
 
-        // อัพเดตสถานะของรอบปัจจุบัน
-        currentRoundPayment.status = "paid";
+      // Parse itemIds if they are JSON strings
+      itemsToConfirm = itemsToConfirm.map(item => {
+        if (typeof item.itemId === 'string' && item.itemId.startsWith('[')) {
+          try {
+            return {
+              ...item,
+              itemId: JSON.parse(item.itemId)
+            };
+          } catch (e) {
+            console.warn("Failed to parse itemId:", item.itemId);
+            return item;
+          }
+        }
+        return item;
+      });
 
-        // เช็คว่าทุกคนจ่ายรอบปัจจุบันครบหรือยัง
-        const allPaidCurrentRound = bill.items.every((item) =>
-          item.sharedWith.every(
-            (share) =>
-              share.roundPayments.find((p) => p.round === currentRound)
-                ?.status === "paid"
+      // Flatten array items
+      itemsToConfirm = itemsToConfirm.flatMap(item => {
+        if (Array.isArray(item.itemId)) {
+          return item.itemId.map(id => ({
+            itemId: id,
+            userIdToConfirm: item.userIdToConfirm
+          }));
+        }
+        return item;
+      });
+
+      // Track results
+      const results = {
+        successful: [],
+        failed: []
+      };
+
+      // Process each confirmation
+      for (const { itemId, userIdToConfirm } of itemsToConfirm) {
+        try {
+          // Find item
+          const item = bill.items.find(item => 
+            item._id.toString() === itemId.toString()
+          );
+
+          if (!item) {
+            results.failed.push({
+              itemId,
+              userIdToConfirm,
+              reason: "Item not found in bill"
+            });
+            continue;
+          }
+
+          // Find user's share
+          const userShare = item.sharedWith.find(share => 
+            share.user.toString() === userIdToConfirm
+          );
+
+          if (!userShare) {
+            results.failed.push({
+              itemId,
+              userIdToConfirm,
+              reason: "User not found in shared list"
+            });
+            continue;
+          }
+
+          // Handle round payment
+          if (bill.paymentType === "round") {
+            const currentRound = bill.roundDetails.currentRound;
+            const roundPayment = userShare.roundPayments.find(p => 
+              p.round === currentRound
+            );
+
+            if (!roundPayment || roundPayment.status !== "awaiting_confirmation") {
+              results.failed.push({
+                itemId,
+                userIdToConfirm,
+                reason: "Payment is not awaiting confirmation for current round"
+              });
+              continue;
+            }
+
+            roundPayment.status = "paid";
+
+          } else {
+            // Handle normal payment
+            if (userShare.status !== "awaiting_confirmation") {
+              results.failed.push({
+                itemId,
+                userIdToConfirm,
+                reason: "Payment is not awaiting confirmation"
+              });
+              continue;
+            }
+
+            userShare.status = "paid";
+          }
+
+          // Create transaction
+          const transaction = new Transaction({
+            user: bill.creator[0].userId,
+            workspace: bill.workspace,
+            type: "Income",
+            amount: userShare.shareAmount,
+            category: "Bill Payment",
+            description: bill.paymentType === "round" 
+              ? `Bill payment from ${userShare.name} (Round ${bill.roundDetails.currentRound}/${bill.roundDetails.totalPeriod})`
+              : `Bill payment from ${userShare.name}`,
+            slip_image: bill.paymentType === "round" 
+              ? roundPayment.eSlip 
+              : userShare.eSlip,
+            reference: {
+              type: "Bill",
+              id: bill._id,
+              itemId,
+              userId: userIdToConfirm,
+              ...(bill.paymentType === "round" && { round: bill.roundDetails.currentRound })
+            }
+          });
+
+          await transaction.save();
+
+          results.successful.push({
+            itemId,
+            userIdToConfirm,
+            amount: userShare.shareAmount,
+            status: "paid"
+          });
+
+        } catch (error) {
+          results.failed.push({
+            itemId,
+            userIdToConfirm,
+            reason: error.message
+          });
+        }
+      }
+
+      // Update bill status if needed
+      if (bill.paymentType === "round") {
+        const allPaidCurrentRound = bill.items.every(item =>
+          item.sharedWith.every(share =>
+            share.roundPayments.find(p => 
+              p.round === bill.roundDetails.currentRound
+            )?.status === "paid"
           )
         );
 
         if (allPaidCurrentRound) {
-          // ถ้าเป็นรอบสุดท้าย
-          if (currentRound === bill.roundDetails.totalPeriod) {
+          if (bill.roundDetails.currentRound === bill.roundDetails.totalPeriod) {
             bill.status = "paid";
           } else {
-            // เลื่อนไปรอบถัดไป
             bill.roundDetails.currentRound++;
-
-            // เตรียมรอบถัดไปสำหรับทุกคน
-            bill.items.forEach((item) => {
-              item.sharedWith.forEach((share) => {
-                const nextRoundPayment = share.roundPayments.find(
-                  (p) => p.round === currentRound + 1
-                );
-                if (nextRoundPayment) {
-                  nextRoundPayment.status = "pending";
-                }
-              });
-            });
           }
         }
-
-        // Create transaction for round payment
-        const transaction = new Transaction({
-          user: bill.creator[0].userId,
-          workspace: bill.workspace,
-          type: "Income",
-          amount: userShare.shareAmount,
-          category: "Bill Payment",
-          description: `Bill payment received from ${userShare.name} (Round ${currentRound}/${bill.roundDetails.totalPeriod})`,
-          slip_image: currentRoundPayment.eSlip,
-          reference: {
-            type: "Bill",
-            id: bill._id,
-            itemId: itemId,
-            userId: userIdToConfirm,
-            round: currentRound,
-          },
-        });
-
-        await Promise.all([bill.save(), transaction.save()]);
       } else {
-        // สำหรับบิลปกติ
-        if (userShare.status !== "awaiting_confirmation") {
-          return res.status(400).json({
-            success: false,
-            message: "Payment is not awaiting confirmation",
-          });
-        }
-
-        userShare.status = "paid";
-
-        // เช็คว่าทุกคนจ่ายครบหรือยัง
-        const allPaid = bill.items.every((item) =>
-          item.sharedWith.every((share) => share.status === "paid")
+        const allPaid = bill.items.every(item =>
+          item.sharedWith.every(share => 
+            share.status === "paid"
+          )
         );
 
         if (allPaid) {
           bill.status = "paid";
         }
+      }
 
-        // Create transaction for normal payment
-        const transaction = new Transaction({
-          user: bill.creator[0].userId,
-          workspace: bill.workspace,
-          type: "Income",
-          amount: userShare.shareAmount,
-          category: "Bill Payment",
-          description: `Bill payment received from ${userShare.name}`,
-          slip_image: userShare.eSlip,
-          reference: {
-            type: "Bill",
-            id: bill._id,
-            itemId: itemId,
-            userId: userIdToConfirm,
-          },
-        });
-
-        await Promise.all([bill.save(), transaction.save()]);
+      // Save changes if any successful updates
+      if (results.successful.length > 0) {
+        await bill.save();
       }
 
       res.json({
         success: true,
-        message: "Payment confirmed successfully",
-        data: bill,
+        message: "Payments confirmed successfully",
+        data: {
+          bill,
+          summary: {
+            totalConfirmations: itemsToConfirm.length,
+            successful: results.successful,
+            failed: results.failed
+          }
+        }
       });
+
     } catch (err) {
-      console.error("Error in confirm payment:", {
+      console.error("Error in bulk confirm payment:", {
         error: err.message,
         stack: err.stack,
         billId: id,
-        body: req.body,
+        body: req.body
       });
+
       res.status(500).json({
         success: false,
-        message: "Failed to confirm payment",
-        error: err.message,
+        message: "Failed to confirm payments",
+        error: err.message
       });
     }
   }
