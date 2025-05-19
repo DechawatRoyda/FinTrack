@@ -62,15 +62,8 @@ router.post(
         avatar_url,
       } = req.body;
 
-      // ✅ ตรวจสอบเฉพาะฟิลด์ที่จำเป็น
-      if (
-        !username ||
-        !password ||
-        !confirmPassword ||
-        !name ||
-        !email ||
-        !otp
-      ) {
+      // ✅ Check required fields
+      if (!username || !password || !confirmPassword || !name || !email || !otp) {
         return res.status(400).json({
           success: false,
           message: "Required fields are missing",
@@ -85,7 +78,7 @@ router.post(
         });
       }
 
-      // ✅ ตรวจสอบ OTP
+      // ✅ Validate OTP
       const otpVerification = otpService.verifyOTP(email, otp);
       if (!otpVerification.success) {
         return res.status(400).json({
@@ -94,7 +87,7 @@ router.post(
         });
       }
 
-      // ✅ ตรวจสอบ password
+      // ✅ Check password match
       if (password !== confirmPassword) {
         return res.status(400).json({
           success: false,
@@ -102,10 +95,18 @@ router.post(
         });
       }
 
-      // ✅ ตรวจสอบค่าที่ซ้ำ (เฉพาะ required fields)
+      // ✅ Check for duplicates (required fields)
       const duplicateQuery = {
-        $or: [{ username: username }, { email: email }],
+        $or: [
+          { username: username },
+          { email: email }
+        ]
       };
+
+      // Add numberAccount to query only if provided and not empty
+      if (numberAccount?.trim()) {
+        duplicateQuery.$or.push({ numberAccount: numberAccount.trim() });
+      }
 
       const duplicateChecks = await User.findOne(duplicateQuery);
 
@@ -117,6 +118,9 @@ router.post(
         if (duplicateChecks.email === email) {
           errors.push("Email is already registered");
         }
+        if (numberAccount?.trim() && duplicateChecks.numberAccount === numberAccount.trim()) {
+          errors.push("Account number is already registered");
+        }
         return res.status(400).json({
           success: false,
           message: "Duplicate values found",
@@ -127,7 +131,7 @@ router.post(
       // ✅ Hash password
       const hashedPassword = await bcrypt.hash(password, 10);
 
-      // ✅ สร้าง user object (เฉพาะฟิลด์ที่มีค่า)
+      // ✅ Create user object with required fields
       const userData = {
         username,
         password: hashedPassword,
@@ -135,32 +139,83 @@ router.post(
         email,
       };
 
-      // เพิ่มฟิลด์เสริมถ้ามีค่า
-      if (phone) userData.phone = phone;
-      if (numberAccount) userData.numberAccount = numberAccount;
-      if (max_limit_expense) userData.max_limit_expense = max_limit_expense;
-      if (avatar_url) userData.avatar_url = avatar_url;
+      // Add optional fields if they have values
+      if (phone?.trim()) userData.phone = phone.trim();
+      if (numberAccount?.trim()) userData.numberAccount = numberAccount.trim();
+      if (max_limit_expense) userData.max_limit_expense = Number(max_limit_expense);
+      if (avatar_url?.trim()) userData.avatar_url = avatar_url.trim();
 
+      // Create and save new user
       const newUser = new User(userData);
       await newUser.save();
 
+      // Return success response
       res.status(201).json({
         success: true,
         message: "User registered successfully",
       });
+
     } catch (err) {
-      console.error("Registration error:", err);
+      console.error("Registration error:", {
+        error: err.message,
+        code: err.code,
+        keyPattern: err.keyPattern,
+        body: req.body
+      });
+
+      // Handle duplicate key error
       if (err.code === 11000) {
         const field = Object.keys(err.keyPattern)[0];
+        
+        // Skip numberAccount if it's empty
+        if (field === 'numberAccount' && (!req.body.numberAccount || req.body.numberAccount.trim() === '')) {
+          try {
+            // Create new user without numberAccount
+            const userData = {
+              username: req.body.username,
+              password: await bcrypt.hash(req.body.password, 10),
+              name: req.body.name,
+              email: req.body.email,
+            };
+
+            // Add other optional fields
+            if (req.body.phone?.trim()) userData.phone = req.body.phone.trim();
+            if (req.body.max_limit_expense) userData.max_limit_expense = Number(req.body.max_limit_expense);
+            if (req.body.avatar_url?.trim()) userData.avatar_url = req.body.avatar_url.trim();
+
+            const newUser = new User(userData);
+            await newUser.save();
+
+            return res.status(201).json({
+              success: true,
+              message: "User registered successfully"
+            });
+          } catch (retryErr) {
+            console.error("Retry registration error:", {
+              error: retryErr.message,
+              stack: retryErr.stack
+            });
+            return res.status(500).json({
+              success: false,
+              message: "Registration failed on retry",
+              error: retryErr.message
+            });
+          }
+        }
+
+        // Return duplicate error for other fields
         return res.status(400).json({
           success: false,
           message: "Duplicate value",
-          details: [`${field} is already registered`],
+          details: [`${field} is already registered`]
         });
       }
+      
+      // Return general error
       res.status(500).json({
         success: false,
-        message: "Internal server error",
+        message: "Registration failed",
+        error: err.message
       });
     }
   }

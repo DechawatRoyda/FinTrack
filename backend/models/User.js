@@ -24,6 +24,7 @@ const userSchema = new mongoose.Schema({
   numberAccount: {
     type: String,
     required: false, // หมายเลขบัญชีที่ใช้จ่าย
+    sparse: true, // เพิ่ม sparse index
     unique: true,
     trim: true,
   },
